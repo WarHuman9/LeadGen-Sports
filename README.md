@@ -27,7 +27,7 @@ The codebase explicitly separates data configuration, orchestration, session rec
 The project is built around a few focused modules:
 
 - `config.py` — single source of truth for Apify actor run inputs, category filters, location settings, and validation logic.
-- `apify_scrapper_v1.py` — main orchestration script; runs the Maps → Playwright → Instagram → Ads pipeline and writes the final output.
+- `main_apify.py` — main orchestration script; runs the Maps → Playwright → Instagram → Ads pipeline and writes the final output.
 - `pipeline_session.py` — SQLite-backed persistence layer for crash recovery, resumable Apify calls, dataset reconciliation, and execution logging.
 - `health_monitor.py` — circuit breaker / health monitoring for network and system issues.
 - `playwright_engine.py` — browser automation layer that finds Instagram/Facebook links on business websites using scoped scans, sitemap discovery, section-text fallback, and watchdog recovery.
@@ -63,7 +63,7 @@ The project is built around a few focused modules:
 ```text
 src
 └──/
-   ├── apify_scrapper_v1.py       # Main pipeline orchestration
+   ├── main_apify.py       # Main pipeline orchestration
    ├── config.py                  # centralized config and Apify payloads
    ├── health_monitor.py          # circuit breaker and detectors
    ├── pipeline_session.py        # crash-safe session handling and resume logic
@@ -122,18 +122,18 @@ APIFY_API_TOKEN=your_token_here
 
 ## Running the pipeline
 
-The main script is `apify_scrapper_v1.py`.
+The main script is `main_apify.py`.
 
 ### Fresh run
 
 ```bash
-python apify_scrapper_v1.py
+python main_apify.py
 ```
 
 ### Resume a previous run
 
 ```bash
-python apify_scrapper_v1.py --resume sessions\active\your_session.db
+python main_apify.py --resume sessions\active\your_session.db
 ```
 
 ### Rescue flags for partial dataset recovery
@@ -141,7 +141,7 @@ python apify_scrapper_v1.py --resume sessions\active\your_session.db
 The script supports recovery flags for incomplete Apify dataset state:
 
 ```bash
-python apify_scrapper_v1.py \
+python main_apify.py \
   --resume sessions\active\your_session.db \
   --MapDatasetID <maps_dataset_id> \
   --igDatasetID <instagram_dataset_id>
