@@ -15,7 +15,7 @@ reconciliation, resumable Apify calls) is mostly settled, with only minor
 fixes left; health_monitor.py still has real design work ahead of it (B4
 Phase 2's resource detectors, B6's other candidates). This file has ZERO
 import of, or dependency on, health_monitor.py -- composition of the two
-happens one level up, in apify_scrapper_v1.py, which constructs one
+happens one level up, in main_apify.py, which constructs one
 PipelineSession and one health_monitor.PipelineHealthMonitor independently
 and calls into each on its own terms. See health_monitor.py's own
 docstring for the full reasoning and the expected usage shape.
@@ -50,18 +50,18 @@ Does NOT own, and never should: pipeline health / circuit-breaking (now
 health_monitor.py, entirely -- see the note above), Playwright
 orchestration, Instagram/Ads response *classification* (private/
 restricted/not_found/NGO detection, follower-tier logic, ad-status-code
-mapping -- Items 6/7/8/8b/9/11/19 all stay in apify_scrapper_v1.py), or CSV
+mapping -- Items 6/7/8/8b/9/11/19 all stay in main_apify.py), or CSV
 writing/tiering (Item 12). The dividing line: this file manages *durable
-session state and resumable-call survival*; apify_scrapper_v1.py still
+session state and resumable-call survival*; main_apify.py still
 owns every decision about what a result *means*.
 
 The resource profiler that produced B4's real observational data
-(apify_scrapper_v1_profiler.py) was explicitly a throwaway test harness for
+(main_apify_profiler.py) was explicitly a throwaway test harness for
 that observation phase -- this module has no dependency on it and none of
 its code was reused here.
 
 =============================================================================
-HOW apify_scrapper_v1.py IS EXPECTED TO CONSUME THIS FILE
+HOW main_apify.py IS EXPECTED TO CONSUME THIS FILE
 =============================================================================
     import pipeline_session
     import health_monitor  # separate, independently-constructed object --
@@ -163,7 +163,7 @@ OUT IN implementation_plan_4.md ITSELF -- flagged here rather than buried
 =============================================================================
 WHAT'S STILL UNVERIFIED (flagged in-line where it matters, not hidden)
 =============================================================================
-- A5's .start() / .wait_for_finish() call shapes: apify_scrapper_v1.py's
+- A5's .start() / .wait_for_finish() call shapes: main_apify.py's
   existing, tested code only ever calls the combined `.call()` -- it has
   never exercised `.start()` or a standalone `.wait_for_finish()` against
   real Apify traffic. `_extract_run_id()`/`_extract_dataset_id()` below
@@ -203,7 +203,7 @@ SESSIONS_ARCHIVE_DIR = SESSIONS_ROOT / "archive"
 
 def _now() -> str:
     """UTC ISO-8601 timestamp -- consistent with the rest of this project's
-    timezone-aware datetime handling (see apify_scrapper_v1.py's own
+    timezone-aware datetime handling (see main_apify.py's own
     current_time = datetime.now(timezone.utc))."""
     return datetime.now(timezone.utc).isoformat()
 
@@ -361,7 +361,7 @@ _MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
 
 def _extract_run_id(run_obj: Any) -> Optional[str]:
     """See this module's docstring, 'What's still unverified' -- mirrors
-    apify_scrapper_v1.py's proven getattr-based access, with a dict
+    main_apify.py's proven getattr-based access, with a dict
     fallback since .start()'s exact return shape hasn't been exercised
     against real Apify traffic yet."""
     run_id = getattr(run_obj, "id", None)
@@ -373,7 +373,7 @@ def _extract_run_id(run_obj: Any) -> Optional[str]:
 
 
 def _extract_dataset_id(run_obj: Any) -> Optional[str]:
-    """Same caveat as _extract_run_id() -- mirrors apify_scrapper_v1.py's
+    """Same caveat as _extract_run_id() -- mirrors main_apify.py's
     existing, tested `getattr(maps_run, "default_dataset_id", None)`
     pattern exactly, so this module doesn't introduce a second, unverified
     access convention alongside the one that's already live and proven."""
@@ -403,7 +403,7 @@ def _start_and_track(
 
     Deliberately NOT wrapped in this module's own try/except -- a genuine
     Apify-side failure here (auth, network, quota) should propagate to the
-    caller as a real exception, same as apify_scrapper_v1.py's existing
+    caller as a real exception, same as main_apify.py's existing
     per-call try/except blocks already handle today. This helper only
     owns the resumable-persistence mechanics, not failure handling policy.
     """
@@ -429,7 +429,7 @@ def _start_and_track(
 
 def _stable_fallback_place_id(item: dict[str, Any]) -> str:
     """Used only when Maps' own `placeId` is absent -- rare, but
-    apify_scrapper_v1.py already explicitly handles this case today (its
+    main_apify.py already explicitly handles this case today (its
     own fallback: `f"no_id_{idx}_{name}"`). A purely positional or
     name-based fallback is NOT safe for THIS module's purposes
     specifically: _reconcile_places() can re-fetch the same dataset_id on
@@ -439,7 +439,7 @@ def _stable_fallback_place_id(item: dict[str, Any]) -> str:
     regardless of fetch order or position, since it's derived purely from
     the item's own data. This never surfaces in the CSV (place_id is an
     internal identity key only), so it doesn't need to match
-    apify_scrapper_v1.py's own fallback format -- only to be stable across
+    main_apify.py's own fallback format -- only to be stable across
     repeated fetches within this module."""
     digest = hashlib.sha256(
         json.dumps(item, sort_keys=True, default=str).encode("utf-8")
@@ -448,11 +448,11 @@ def _stable_fallback_place_id(item: dict[str, Any]) -> str:
 
 
 def _extract_ig_handle(item: dict[str, Any]) -> Optional[str]:
-    """Identity-key extraction ONLY -- mirrors apify_scrapper_v1.py's own
+    """Identity-key extraction ONLY -- mirrors main_apify.py's own
     Step 3 handle resolution (Items 6/7/8b) so the two files never
     disagree about what 'the same handle' means, but intentionally stops
     there: classification (private/restricted/not_found/NGO detection)
-    stays entirely in apify_scrapper_v1.py, per this module's scope
+    stays entirely in main_apify.py, per this module's scope
     boundary. This function only needs to answer 'have we already seen
     this handle in a completed batch,' not what that handle's business
     classification should be."""
@@ -833,7 +833,7 @@ class PipelineSession:
         )
 
     def _load_places_raw(self) -> list[dict[str, Any]]:
-        """Returns the same shape apify_scrapper_v1.py's existing
+        """Returns the same shape main_apify.py's existing
         _get_dataset_items() already returns -- a plain list of Maps
         place_data dicts -- so Step 2's existing loop body over `places`
         needs zero changes to consume either source interchangeably."""
@@ -1219,7 +1219,7 @@ class PipelineSession:
 
             run_input = dict(run_input_base)
             run_input["directUrls"] = [f"https://www.instagram.com/{h}/" for h in sorted_missing]
-            # BUGFIX (mirrors apify_scrapper_v1.py's own 2026-07-22 fix --
+            # BUGFIX (mirrors main_apify.py's own 2026-07-22 fix --
             # carried over here so it isn't silently reintroduced).
             # config.INSTAGRAM_RUN_INPUT's "resultsLimit" is a documented
             # placeholder (see config.py's own comment on that field) --
@@ -1229,7 +1229,7 @@ class PipelineSession:
             # profile". Left at run_input_base's placeholder value, only
             # 1 of however many handles are in sorted_missing would ever
             # come back -- silently reintroducing the exact bug
-            # apify_scrapper_v1.py already fixed once, and reintroducing
+            # main_apify.py already fixed once, and reintroducing
             # it on EVERY future supplemental/resumed batch too, not just
             # the first call, since this one block is what both the
             # initial (is_supplemental=0) and supplemental
@@ -1292,9 +1292,9 @@ class PipelineSession:
         self, client: Any, place_id: str, fb_link: str, run_input_base: dict[str, Any]
     ) -> Optional[list[dict[str, Any]]]:
         """Returns the raw ad_results list (or None if no dataset could be
-        resolved), the exact shape apify_scrapper_v1.py's existing Step 4
+        resolved), the exact shape main_apify.py's existing Step 4
         classification logic (Item 11) already expects -- that
-        classification stays entirely in apify_scrapper_v1.py; this
+        classification stays entirely in main_apify.py; this
         method only owns the crash-safe call mechanics."""
         existing_run_id = self._get_place_ads_run_id(place_id)
         run_input = dict(run_input_base)
@@ -1312,7 +1312,7 @@ class PipelineSession:
 
     # -----------------------------------------------------------------
     # A4a: rehydration -- MANDATORY on resume, not optional. Reconstructs
-    # the exact local_records dict shape apify_scrapper_v1.py's Step 5
+    # the exact local_records dict shape main_apify.py's Step 5
     # already expects, so a resumed run's CSV never silently contains only
     # the delta this invocation itself processed.
     # -----------------------------------------------------------------

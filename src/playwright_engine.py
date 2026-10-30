@@ -2,7 +2,7 @@
 playwright_engine.py
 
 Playwright execution engine -- everything about actually driving a browser
-against a business website lives here, separate from apify_scrapper_v1.py's
+against a business website lives here, separate from main_apify.py's
 own pipeline shape (Maps discovery -> [this] -> Instagram batch -> Ads
 check -> CSV export). Nothing in this file knows what a "sports academy
 lead" is; it only knows how to find Instagram/Facebook links on a website.
@@ -21,7 +21,7 @@ CONTAINS
   thread, so we force-kill the leaked process tree via psutil and replace
   the worker entirely.
 - resolve_social_links(worker, website) -- the single entry point
-  apify_scrapper_v1.py calls; runs the full fallback chain and returns a
+  main_apify.py calls; runs the full fallback chain and returns a
   plain dict ready to merge into a record.
 
 FALLBACK ORDER (confirmed 2026-07-11 -- guessed-path fully retired, not
@@ -149,7 +149,7 @@ logger = logging.getLogger(__name__)
 
 
 # =====================================================================
-# CONSTANTS -- identical to apify_scrapper_v1.py where they overlap, so
+# CONSTANTS -- identical to main_apify.py where they overlap, so
 # behavior doesn't silently drift between the two files. If you change
 # FB_SKIP_PATHS / IG_SKIP_PATHS / USER_AGENT_PROFILES here, mirror it there
 # until the main script is fully switched over to importing from this file.
@@ -273,7 +273,7 @@ FALLBACK_WATCHDOG_SECONDS = 25   # applied individually per sitemap/section/gues
 
 
 # =====================================================================
-# Browser session helpers -- unchanged from apify_scrapper_v1.py
+# Browser session helpers -- unchanged from main_apify.py
 # =====================================================================
 def structural_resource_router(route: Any) -> Any:
     """Abort heavy/tracking requests; continue everything else."""
@@ -394,7 +394,7 @@ def force_kill_new_children(baseline_pids: set[int]) -> None:
 
 
 # =====================================================================
-# Jitter scroll -- same pattern as apify_scrapper_v1.py, with round/time
+# Jitter scroll -- same pattern as main_apify.py, with round/time
 # logging added so the actual cost against the watchdog budget is visible.
 #
 # SCROLL_WALL_CLOCK_BUDGET_SECONDS is a hard ceiling across the *entire*
@@ -928,7 +928,7 @@ class PlaywrightWorker:
 
 
 # =====================================================================
-# resolve_social_links -- the single entry point apify_scrapper_v1.py
+# resolve_social_links -- the single entry point main_apify.py
 # calls. Runs the full fallback chain (see module docstring for order)
 # and returns a plain dict ready to merge into a record.
 # =====================================================================

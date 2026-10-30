@@ -14,7 +14,7 @@ actually lived in:
   1. Configuration was split across THREE places with THREE unrelated
      syntaxes: `.env` (flat key=value strings) for search/location/category
      fields, a separate `.json` file for the target polygon (GeoJSON's own
-     nesting and coordinate-order rules), and apify_scrapper_v1.py itself
+     nesting and coordinate-order rules), and main_apify.py itself
      for every Instagram/Ads actor field. Changing "what this run does"
      routinely meant touching two or three files with no shared editing
      model.
@@ -41,7 +41,7 @@ actually lived in:
      Google Maps actor's timeout parameter). Before this file existed, a
      schema change to anything NOT in `.env`/JSON -- i.e. any Instagram or
      Ads actor field, or any of the Maps actor's static cost-control flags
-     -- required editing apify_scrapper_v1.py directly: the same file that
+     -- required editing main_apify.py directly: the same file that
      also holds all the retry/watchdog/tiering/classification logic. A
      third party renaming one field shouldn't force a diff against that
      file at all.
@@ -67,7 +67,7 @@ warning? If yes, it belongs in this file, regardless of how rarely you'd
 actually touch it. If it's this pipeline's OWN vocabulary instead --
 something that only ever grows over time and is never at risk of being
 renamed out from under you by someone else (a junk-domain keyword list, an
-NGO-detection keyword list) -- it stays in apify_scrapper_v1.py next to the
+NGO-detection keyword list) -- it stays in main_apify.py next to the
 logic that uses it. That's why AD_ID_FIELDS lives here (it's a list of
 field names from the ADS actor's OWN response shape -- the same
 upstream-could-rename-this risk as an input field, just on the response
@@ -88,7 +88,7 @@ client, the CSV writer, or any other pipeline behavior. That's the
 distinction that matters: config self-consistency checks are still "just
 data" in spirit, even though they're technically functions. Anything that
 touches the REST of the pipeline's behavior belongs in
-apify_scrapper_v1.py, which is meant to shrink to pure orchestration --
+main_apify.py, which is meant to shrink to pure orchestration --
 read these dicts, call the actors, run the classification/tiering logic,
 write the CSV, nothing else.
 
@@ -102,7 +102,7 @@ WHAT STAYS OUTSIDE THIS FILE, AND WHY
     This file has no secrets in it, so unlike `.env` it's meant to be
     committed to git as-is, in full -- no `config.example.py` needed.
 
-  - apify_scrapper_v1.py keeps `SKIP_WEBSITE_KEYWORDS` and
+  - main_apify.py keeps `SKIP_WEBSITE_KEYWORDS` and
     `IG_BLOCK_KEYWORDS` (this pipeline's own filtering vocabulary -- see
     the line-drawing rule above), and `OUTPUT_EXT` (changing the output
     file's extension isn't a config change, it's a code change -- the CSV
@@ -130,7 +130,7 @@ already is a list, with no delimiter or escaping scheme standing between
 the value you type and the value the actor receives.
 
 =============================================================================
-HOW apify_scrapper_v1.py IS EXPECTED TO CONSUME THIS FILE
+HOW main_apify.py IS EXPECTED TO CONSUME THIS FILE
 =============================================================================
   - `import config` near its other imports. Importing this module IS the
     validation step -- if LOCATION_QUERY/CUSTOM_GEOLOCATION conflict, or
@@ -160,7 +160,7 @@ HOW apify_scrapper_v1.py IS EXPECTED TO CONSUME THIS FILE
     itself -- exactly one of `locationQuery`/`customGeolocation` must be
     chosen, and `categoryFilterWords` is meant to be OMITTED entirely
     (not sent as an empty list) when unset. That decision-making stays in
-    apify_scrapper_v1.py's Step 1, same as before this redesign -- this
+    main_apify.py's Step 1, same as before this redesign -- this
     file only guarantees the two location fields aren't BOTH set or BOTH
     unset when you're done editing it.
 
@@ -289,7 +289,7 @@ CUSTOM_GEOLOCATION: Optional[dict[str, Any]] = None
 # categoryFilterWords entries are CASE-SENSITIVE against Google's own
 # category taxonomy (confirmed via implementation_plan_2.md's Item 13
 # research) -- double-check case when adding new entries here. Empty list
-# is valid; apify_scrapper_v1.py omits the categoryFilterWords key
+# is valid; main_apify.py omits the categoryFilterWords key
 # entirely rather than sending an empty list when this is empty.
 '''
 CATEGORY_FILTER_WORDS: list[str] = [
@@ -311,7 +311,7 @@ CATEGORY_FILTER_WORDS: list[str] = [
 '''
 # Everything else Compass's input schema accepts -- static cost-control
 # flags included, per this file's "everything, all actors" scope decision.
-# apify_scrapper_v1.py starts from a COPY of this dict, then conditionally
+# main_apify.py starts from a COPY of this dict, then conditionally
 # adds locationQuery/customGeolocation and categoryFilterWords (see the
 # module docstring above for why those three stay separate from this
 # dict rather than being pre-merged in here).
@@ -341,7 +341,7 @@ MAPS_RUN_INPUT: dict[str, Any] = {
 # =====================================================================
 # "directUrls" is intentionally NOT included here -- it's discovered data
 # (the Instagram URLs Playwright found this run), not configuration. See
-# the module docstring's "HOW apify_scrapper_v1.py IS EXPECTED TO CONSUME
+# the module docstring's "HOW main_apify.py IS EXPECTED TO CONSUME
 # THIS FILE" section for the exact merge pattern.
 INSTAGRAM_RUN_INPUT: dict[str, Any] = {
     "resultsType":  "details",
@@ -353,7 +353,7 @@ INSTAGRAM_RUN_INPUT: dict[str, Any] = {
     # to 12 of per profile regardless of this field). A fixed value of 1
     # here previously caused only 1 profile out of an entire batch to ever
     # come back, with every other profile silently vanishing into Item
-    # 8b's "missing from batch response" catch-all. apify_scrapper_v1.py
+    # 8b's "missing from batch response" catch-all. main_apify.py
     # overrides this at call time to len(instagram_urls_batch), since the
     # correct value is derived from discovered data (how many URLs this
     # run actually found), not a fixed config constant. Left at 1 here
@@ -422,13 +422,13 @@ HEALTH_MONITOR_KWARGS: HealthMonitorKwargs = {
 
 # Output CSV filename base -- auto-increments if the file already exists
 # (filtered_sports_academies.csv -> filtered_sports_academies(1).csv,
-# etc.). OUTPUT_EXT stays in apify_scrapper_v1.py -- see module docstring.
+# etc.). OUTPUT_EXT stays in main_apify.py -- see module docstring.
 OUTPUT_BASE_NAME: str = "london_sports_academies"
 
 
 # =====================================================================
 # SELF-VALIDATION -- runs automatically at import time (see module
-# docstring's "HOW apify_scrapper_v1.py IS EXPECTED TO CONSUME THIS
+# docstring's "HOW main_apify.py IS EXPECTED TO CONSUME THIS
 # FILE"). Config self-consistency checks only -- neither function below
 # touches Playwright, the Apify client, or any pipeline behavior; they
 # only check this file's own values against each other.
@@ -586,7 +586,7 @@ def _validate_target_multipolygon_labels(
 
 
 # Runs unconditionally at import time -- `import config` succeeding IS the
-# validation passing. No separate step for apify_scrapper_v1.py to
+# validation passing. No separate step for main_apify.py to
 # remember to call, no message-passing protocol between the two files.
 #
 # TARGET_MULTIPOLYGON is validated unconditionally, regardless of which

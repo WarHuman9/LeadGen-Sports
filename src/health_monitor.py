@@ -53,11 +53,11 @@ threshold values as plain arguments (ram_enabled, ram_threshold_percent,
 cpu_enabled, cpu_threshold_percent, cpu_sustained_seconds), each with a
 standalone-use default (see _DEFAULT_* constants below, derived from the
 2026-07-21 profiler run) so the class still works with zero arguments.
-apify_scrapper_v1.py -- not this file -- is expected to read config.py's
+main_apify.py -- not this file -- is expected to read config.py's
 values and pass them in at construction time, the exact same "compose at
 the call site, one level up" pattern already used for PipelineSession +
 PipelineHealthMonitor being built independently. Not yet wired into
-config.py or apify_scrapper_v1.py as of this change -- that's the next
+config.py or main_apify.py as of this change -- that's the next
 step, out of scope for this specific edit, which is scoped to
 health_monitor.py's own detector classes only.
 
@@ -69,9 +69,9 @@ and independent evolution harder: any change to a detector's constructor
 signature, or a new detector being added, meant touching (and re-running
 every test against) the session-resume file too, even though the two
 concerns have no actual logical dependency on each other. Composition
-happens one level up, in apify_scrapper_v1.py, which constructs one
+happens one level up, in main_apify.py, which constructs one
 PipelineSession and one PipelineHealthMonitor independently and calls into
-each on its own terms -- see "HOW apify_scrapper_v1.py IS EXPECTED TO
+each on its own terms -- see "HOW main_apify.py IS EXPECTED TO
 CONSUME THIS FILE" below.
 
 One thing worth being explicit about, since it's easy to assume otherwise:
@@ -79,14 +79,14 @@ there is no natural point where a resumable Apify call
 (pipeline_session.py's _start_and_track(), wrapping .start() + persist +
 .wait_for_finish()) checks health mid-call. That blocking wait is a single
 call into apify-client with no health-check hook inside it today. Health
-checks happen BETWEEN records in apify_scrapper_v1.py's own loops (Step
+checks happen BETWEEN records in main_apify.py's own loops (Step
 2/Step 4), which is also where a network-dependent call's success/failure
 gets reported back via record_network_result() -- this file only ever
 learns about a failure because the orchestration script tells it, not by
 observing pipeline_session.py's calls directly.
 
 =============================================================================
-HOW apify_scrapper_v1.py IS EXPECTED TO CONSUME THIS FILE
+HOW main_apify.py IS EXPECTED TO CONSUME THIS FILE
 =============================================================================
     import health_monitor
 
@@ -105,7 +105,7 @@ HOW apify_scrapper_v1.py IS EXPECTED TO CONSUME THIS FILE
     reason = health.check_health()
     if reason:
         logging.error(f"Circuit breaker tripped: {reason}")
-        # ... pause / abort / whatever policy apify_scrapper_v1.py decides --
+        # ... pause / abort / whatever policy main_apify.py decides --
         # this file only detects and reports, it never itself stops anything.
 
 RAMDetector and CPUDetector (B4 Phase 2) are now included in
@@ -365,7 +365,7 @@ class ConsecutiveFailureDetector:
 # only (i.e. what PipelineHealthMonitor() falls back to if constructed
 # with zero arguments) -- once config.py carries the real
 # RAM_THRESHOLD_PERCENT / CPU_THRESHOLD_PERCENT / CPU_SUSTAINED_SECONDS
-# values, apify_scrapper_v1.py's real construction call is expected to
+# values, main_apify.py's real construction call is expected to
 # pass those in instead of relying on these fallbacks (see the module
 # docstring's "WHERE THRESHOLDS/TOGGLES LIVE" section).
 # =====================================================================
@@ -515,7 +515,7 @@ class CPUDetector:
 
 # =====================================================================
 # PipelineHealthMonitor -- bundles the default detector set into one
-# convenience object, so apify_scrapper_v1.py doesn't have to manually
+# convenience object, so main_apify.py doesn't have to manually
 # assemble a detector list itself. Mirrors the ergonomic "construct one
 # thing and it works" pattern PipelineSession used to provide directly,
 # before the split -- now scoped correctly to this module instead of
@@ -535,7 +535,7 @@ class PipelineHealthMonitor:
         thresholds, so `PipelineHealthMonitor()` with zero arguments still
         works standalone (matching NLM/consecutive-failure's existing
         zero-arg construction). Real production use is expected to pass
-        these in from config.py via apify_scrapper_v1.py -- see the
+        these in from config.py via main_apify.py -- see the
         module docstring's "WHERE THRESHOLDS/TOGGLES LIVE" section for why
         that wiring happens there and not inside this file."""
         self.detectors: list[Any] = [
