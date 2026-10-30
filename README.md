@@ -63,7 +63,7 @@ The project is built around a few focused modules:
 ```text
 src
 └──/
-   ├── main_apify.py       # Main pipeline orchestration
+   ├── main_apify.py              # Main pipeline orchestration
    ├── config.py                  # centralized config and Apify payloads
    ├── health_monitor.py          # circuit breaker and detectors
    ├── pipeline_session.py        # crash-safe session handling and resume logic
