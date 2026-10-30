@@ -1,0 +1,140 @@
+2026-06-28 15:23:41,056 - INFO - ✅ Extracted 100 records from Maps. Starting Playwright crawler...
+2026-06-28 15:23:41,970 - INFO -  [1/100] 🌐 [PLAYWRIGHT] Scraping: http://www.pureathletex.com
+2026-06-28 15:23:54,673 - INFO -     ↳ 👤 [FACEBOOK]: https://www.facebook.com/PureAthletex
+2026-06-28 15:23:56,653 - INFO -  [2/100] 🌐 [PLAYWRIGHT] Scraping: http://www.purehoopsacademy.com
+2026-06-28 15:24:00,790 - INFO -     ↳ 👤 [FACEBOOK]: https://www.facebook.com/purehoopsacademy
+2026-06-28 15:24:01,868 - INFO -  [3/100] 🌐 [PLAYWRIGHT] Scraping: http://haregoalkeeperacademy.com
+2026-06-28 15:24:04,090 - INFO -     ↳ ⏩ [NO FB LINK] No valid Facebook anchor found.
+2026-06-28 15:24:06,106 - INFO -  [5/100] 🌐 [PLAYWRIGHT] Scraping: https://www.alphatennis.net
+2026-06-28 15:24:18,854 - INFO -     ↳ ⏩ [NO FB LINK] No valid Facebook anchor found.
+2026-06-28 15:24:21,052 - INFO -  [6/100] 🚫 Skipping institutional domain: http://www.northparksports.com
+2026-06-28 15:24:21,053 - INFO -  [7/100] 🌐 [PLAYWRIGHT] Scraping: http://www.pureedgetraining.com
+2026-06-28 15:24:27,932 - INFO -     ↳ 👤 [FACEBOOK]: https://www.facebook.com/pureedgetraining
+2026-06-28 15:24:29,978 - INFO -  [9/100] 🌐 [PLAYWRIGHT] Scraping: http://www.allamericanbaseballacademy.com
+2026-06-28 15:24:36,939 - INFO -     ↳ 👤 [FACEBOOK]: http://www.facebook.com/AllAmericanBaseballAcademy
+2026-06-28 15:24:39,473 - INFO -  [10/100] 🌐 [PLAYWRIGHT] Scraping: https://horshamathletic.com
+2026-06-28 15:24:43,373 - INFO -     ↳ 👤 [FACEBOOK]: https://www.facebook.com/horshamathleticclub
+2026-06-28 15:24:44,616 - INFO -  [11/100] 🌐 [PLAYWRIGHT] Scraping: https://www.el1sports.com
+2026-06-28 15:24:58,940 - INFO -     ↳ 👤 [FACEBOOK]: https://www.facebook.com/EL1Sports
+2026-06-28 15:25:00,986 - INFO -  [13/100] 🌐 [PLAYWRIGHT] Scraping: http://horshamathletic.com
+2026-06-28 15:25:05,015 - INFO -     ↳ 👤 [FACEBOOK]: https://www.facebook.com/horshamathleticclub
+2026-06-28 15:25:05,032 - INFO - ⚙️ [SESSION RESET] Recycling browser to clear cache & rotate IPs...
+2026-06-28 15:25:16,751 - INFO -  [14/100] 🚫 Skipping institutional domain: https://www.philaymca.org
+2026-06-28 15:25:16,752 - INFO -  [15/100] 🌐 [PLAYWRIGHT] Scraping: https://www.424athletefactory.com
+2026-06-28 15:25:28,621 - INFO -     ↳ 👤 [FACEBOOK]: https://www.facebook.com/424AthleteFactory
+2026-06-28 15:25:30,602 - INFO -  [16/100] 🌐 [PLAYWRIGHT] Scraping: https://www.theartofgame.net
+2026-06-28 15:25:37,255 - INFO -     ↳ 👤 [FACEBOOK]: https://www.facebook.com/theartofgame
+2026-06-28 15:25:39,303 - INFO -  [17/100] 🌐 [PLAYWRIGHT] Scraping: http://www.rashidhassantenniscenter.com
+2026-06-28 15:25:46,884 - INFO -     ↳ 👤 [FACEBOOK]: https://www.facebook.com/AxiomThemes-505060569826537
+2026-06-28 15:25:48,064 - INFO -  [18/100] 🌐 [PLAYWRIGHT] Scraping: http://www.pisausa.com
+2026-06-28 15:25:52,187 - INFO -     ↳ 👤 [FACEBOOK]: https://www.facebook.com/pittsburghindoorsportsarena
+2026-06-28 15:25:53,778 - INFO -  [19/100] 🌐 [PLAYWRIGHT] Scraping: https://mtlebanon.org
+2026-06-28 15:25:57,279 - INFO -     ↳ 👤 [FACEBOOK]: https://www.facebook.com/mtlebanonmunicipality
+2026-06-28 15:25:58,492 - INFO -  [20/100] 🌐 [PLAYWRIGHT] Scraping: https://www.glencreektennisclub.com
+2026-06-28 15:26:04,798 - INFO -     ↳ ⏩ [NO FB LINK] No valid Facebook anchor found.
+2026-06-28 15:26:06,898 - INFO -  [21/100] 🌐 [PLAYWRIGHT] Scraping: https://lilleshallsocceracademy.org
+2026-06-28 15:26:08,360 - INFO -     ↳ ❌ [ERROR] Page.goto: net::ERR_CERT_COMMON_NAME_INVALID at https://lilleshallsocceracademy.org/
+Call log:
+  - navigating to "https://lilleshallsocceracademy.org/", waiting until "domcontentloaded"
+
+2026-06-28 15:26:09,712 - INFO -  [22/100] 🌐 [PLAYWRIGHT] Scraping: http://www.alleghenyshotokan.com
+2026-06-28 15:26:17,325 - INFO -     ↳ 👤 [FACEBOOK]: https://www.facebook.com/AlleghenyShotokan
+2026-06-28 15:26:18,784 - INFO -  [25/100] 🌐 [PLAYWRIGHT] Scraping: http://d1wrestling.com
+2026-06-28 15:26:20,375 - INFO -     ↳ ⚠️ [HTTP 403] Server blocked request.
+2026-06-28 15:26:20,397 - INFO - ⚙️ [SESSION RESET] Recycling browser to clear cache & rotate IPs...
+2026-06-28 15:26:32,283 - INFO -  [26/100] 🌐 [PLAYWRIGHT] Scraping: http://www.pittsburghhardball.org
+2026-06-28 15:26:36,276 - INFO -     ↳ 👤 [FACEBOOK]: https://www.facebook.com/profile.php
+2026-06-28 15:26:38,026 - INFO -  [27/100] 🌐 [PLAYWRIGHT] Scraping: https://www.pavilioncricketfacility.com
+2026-06-28 15:26:43,100 - INFO -     ↳ ⏩ [NO FB LINK] No valid Facebook anchor found.
+2026-06-28 15:26:44,824 - INFO -  [28/100] 🌐 [PLAYWRIGHT] Scraping: https://www.panthrofitness.com
+2026-06-28 15:26:51,467 - INFO -     ↳ 👤 [FACEBOOK]: https://www.facebook.com/PanthroFitness
+2026-06-28 15:26:53,249 - INFO -  [29/100] 🌐 [PLAYWRIGHT] Scraping: https://www.upmc.com
+2026-06-28 15:27:00,220 - INFO -     ↳ 👤 [FACEBOOK]: https://www.facebook.com/upmc
+2026-06-28 15:27:01,741 - INFO -  [30/100] 🌐 [PLAYWRIGHT] Scraping: http://getrankedbasketball.com
+2026-06-28 15:27:09,370 - INFO -     ↳ ⏩ [NO FB LINK] No valid Facebook anchor found.
+2026-06-28 15:27:11,036 - INFO -  [31/100] 🌐 [PLAYWRIGHT] Scraping: https://pittsburghpanthers.com
+2026-06-28 15:27:17,287 - INFO -     ↳ ⏩ [NO FB LINK] No valid Facebook anchor found.
+2026-06-28 15:27:18,993 - INFO -  [32/100] 🌐 [PLAYWRIGHT] Scraping: http://shoot360pittsburgh.com
+2026-06-28 15:27:19,919 - INFO -     ↳ ⚠️ [HTTP 403] Server blocked request.
+2026-06-28 15:27:21,798 - INFO -  [33/100] 🌐 [PLAYWRIGHT] Scraping: http://www.whiteoakaa.org
+2026-06-28 15:27:26,384 - INFO -     ↳ ⏩ [NO FB LINK] No valid Facebook anchor found.
+2026-06-28 15:27:28,339 - INFO -  [34/100] 🌐 [PLAYWRIGHT] Scraping: http://pickleballlessonsbylaurel.com
+2026-06-28 15:27:33,661 - INFO -     ↳ 👤 [FACEBOOK]: https://www.facebook.com/Pickleball-Lessons-By-Laurel-1947530398889490
+2026-06-28 15:27:35,715 - INFO -  [35/100] 🌐 [PLAYWRIGHT] Scraping: https://fieldstripfitness.squarespace.com
+2026-06-28 15:27:37,994 - INFO -     ↳ ⚠️ [HTTP 404] Server blocked request.
+2026-06-28 15:27:38,012 - INFO - ⚙️ [SESSION RESET] Recycling browser to clear cache & rotate IPs...
+2026-06-28 15:27:47,717 - INFO -  [37/100] 🌐 [PLAYWRIGHT] Scraping: https://greentreesportsplex.com
+2026-06-28 15:27:54,079 - INFO -     ↳ 👤 [FACEBOOK]: https://www.facebook.com/greentreesportsplex
+2026-06-28 15:27:55,393 - INFO -  [38/100] 🌐 [PLAYWRIGHT] Scraping: http://www.questhockey.com
+2026-06-28 15:28:01,645 - INFO -     ↳ 👤 [FACEBOOK]: http://www.facebook.com/QuestHockey
+2026-06-28 15:28:03,643 - INFO -  [39/100] 🌐 [PLAYWRIGHT] Scraping: http://iotajiujitsu.com
+2026-06-28 15:28:09,651 - INFO -     ↳ 👤 [FACEBOOK]: https://www.facebook.com/people/Iota-Jiu-Jitsu/61587966652374
+2026-06-28 15:28:11,472 - INFO -  [40/100] 🌐 [PLAYWRIGHT] Scraping: http://www.clarkfitboxing.com
+2026-06-28 15:28:13,634 - INFO -     ↳ ⏩ [NO FB LINK] No valid Facebook anchor found.
+2026-06-28 15:28:15,319 - INFO -  [41/100] 🌐 [PLAYWRIGHT] Scraping: http://www.tkapgh.com
+2026-06-28 15:28:18,891 - INFO -     ↳ ⏩ [NO FB LINK] No valid Facebook anchor found.
+2026-06-28 15:28:20,286 - INFO -  [42/100] 🌐 [PLAYWRIGHT] Scraping: https://www.ufcgym.com
+2026-06-28 15:28:23,570 - INFO -     ↳ 👤 [FACEBOOK]: https://www.facebook.com/ufcgym
+2026-06-28 15:28:24,938 - INFO -  [44/100] 🌐 [PLAYWRIGHT] Scraping: http://sygolfacademy.com
+2026-06-28 15:28:25,502 - INFO -     ↳ ❌ [ERROR] Page.goto: net::ERR_NAME_NOT_RESOLVED at http://sygolfacademy.com/
+Call log:
+  - navigating to "http://sygolfacademy.com/", waiting until "domcontentloaded"
+
+2026-06-28 15:28:27,636 - INFO -  [45/100] 🌐 [PLAYWRIGHT] Scraping: https://allstarsportsacademy.com
+2026-06-28 15:28:32,925 - INFO -     ↳ 👤 [FACEBOOK]: https://www.facebook.com/allstarbaseballacademy
+2026-06-28 15:28:35,357 - INFO -  [46/100] 🌐 [PLAYWRIGHT] Scraping: https://allstarsportsacademy.com
+2026-06-28 15:28:38,484 - INFO -     ↳ 👤 [FACEBOOK]: https://www.facebook.com/allstarbaseballacademy
+2026-06-28 15:28:39,855 - INFO -  [47/100] 🌐 [PLAYWRIGHT] Scraping: https://www.virtualfutbolacademy.com
+2026-06-28 15:28:41,791 - INFO -     ↳ ⚠️ [HTTP 404] Server blocked request.
+2026-06-28 15:28:41,813 - INFO - ⚙️ [SESSION RESET] Recycling browser to clear cache & rotate IPs...
+2026-06-28 15:28:49,325 - INFO -  [48/100] 🌐 [PLAYWRIGHT] Scraping: https://ptaguns.com
+2026-06-28 15:28:59,134 - INFO -     ↳ 👤 [FACEBOOK]: https://www.facebook.com/PhiladelphiaTrainingAcademy
+2026-06-28 15:29:01,357 - INFO -  [49/100] 🌐 [PLAYWRIGHT] Scraping: https://www.courtstar.org
+2026-06-28 15:29:07,790 - INFO -     ↳ 👤 [FACEBOOK]: https://www.facebook.com/courtstarbasketballacademy
+2026-06-28 15:29:10,180 - INFO -  [50/100] 🌐 [PLAYWRIGHT] Scraping: https://mainlinewrestling.com
+2026-06-28 15:29:13,391 - INFO -     ↳ 👤 [FACEBOOK]: https://facebook.com/mainlinewrestlingacademy
+2026-06-28 15:29:14,518 - INFO -  [52/100] 🌐 [PLAYWRIGHT] Scraping: http://www.ghosthand.org
+2026-06-28 15:29:22,866 - INFO -     ↳ 👤 [FACEBOOK]: https://www.facebook.com/BlackMountainSpiritSchoolOfChineseKungFu
+2026-06-28 15:29:25,066 - INFO -  [53/100] 🌐 [PLAYWRIGHT] Scraping: http://skydevelopmentpittsburgh.com
+2026-06-28 15:29:29,493 - INFO -     ↳ ⏩ [NO FB LINK] No valid Facebook anchor found.
+2026-06-28 15:29:31,513 - INFO -  [54/100] 🌐 [PLAYWRIGHT] Scraping: https://goduquesne.com
+2026-06-28 15:29:36,193 - INFO -     ↳ 👤 [FACEBOOK]: https://www.facebook.com/people/Duquesne-Track-Field-And-XC/100054520206890
+2026-06-28 15:29:37,878 - INFO -  [55/100] 🌐 [PLAYWRIGHT] Scraping: http://holchealthandfitness.com
+2026-06-28 15:29:41,029 - INFO -     ↳ 👤 [FACEBOOK]: https://www.facebook.com/2455664101335639
+2026-06-28 15:29:43,582 - INFO -  [56/100] 🌐 [PLAYWRIGHT] Scraping: http://www.levelredboxing.com
+2026-06-28 15:29:50,959 - INFO -     ↳ 👤 [FACEBOOK]: https://www.facebook.com/levelredboxing
+2026-06-28 15:29:52,935 - INFO -  [57/100] 🌐 [PLAYWRIGHT] Scraping: https://shapetrain.com
+2026-06-28 15:29:58,106 - INFO -     ↳ ⏩ [NO FB LINK] No valid Facebook anchor found.
+2026-06-28 15:30:00,314 - INFO -  [58/100] 🌐 [PLAYWRIGHT] Scraping: http://www.wrightsgym.com
+2026-06-28 15:30:06,814 - INFO -     ↳ 👤 [FACEBOOK]: https://www.facebook.com/wrightsgym
+2026-06-28 15:30:06,854 - INFO - ⚙️ [SESSION RESET] Recycling browser to clear cache & rotate IPs...
+2026-06-28 15:30:16,428 - INFO -  [59/100] 🌐 [PLAYWRIGHT] Scraping: https://www.ufcgym.com
+2026-06-28 15:30:20,371 - INFO -     ↳ 👤 [FACEBOOK]: https://www.facebook.com/ufcgym
+2026-06-28 15:30:21,673 - INFO -  [60/100] 🌐 [PLAYWRIGHT] Scraping: http://www.pittsburghmuaythai.com
+2026-06-28 15:30:22,106 - INFO -     ↳ ❌ [ERROR] Page.goto: net::ERR_NAME_NOT_RESOLVED at http://www.pittsburghmuaythai.com/
+Call log:
+  - navigating to "http://www.pittsburghmuaythai.com/", waiting until "domcontentloaded"
+
+2026-06-28 15:30:24,146 - INFO -  [61/100] 🌐 [PLAYWRIGHT] Scraping: https://stallworthboxingacademy.com
+2026-06-28 15:30:28,675 - INFO -     ↳ ⏩ [NO FB LINK] No valid Facebook anchor found.
+2026-06-28 15:30:30,678 - INFO -  [62/100] 🌐 [PLAYWRIGHT] Scraping: https://www.wolfpackboxing.com
+2026-06-28 15:30:38,151 - INFO -     ↳ 👤 [FACEBOOK]: https://www.facebook.com/WolfpackBoxingClub
+2026-06-28 15:30:40,515 - INFO -  [63/100] 🌐 [PLAYWRIGHT] Scraping: https://www.freeformfitnesspgh.com
+2026-06-28 15:30:43,849 - INFO -     ↳ ⏩ [NO FB LINK] No valid Facebook anchor found.
+2026-06-28 15:30:44,895 - INFO -  [64/100] 🌐 [PLAYWRIGHT] Scraping: https://punchpgh.com
+2026-06-28 15:30:50,104 - INFO -     ↳ 👤 [FACEBOOK]: https://facebook.com/punchpgh
+2026-06-28 15:30:51,800 - INFO -  [65/100] 🌐 [PLAYWRIGHT] Scraping: https://mayweather.fit
+2026-06-28 15:30:56,279 - INFO -     ↳ 👤 [FACEBOOK]: https://www.facebook.com/mayweatherboxingandfitness
+2026-06-28 15:30:57,405 - INFO -  [66/100] 🌐 [PLAYWRIGHT] Scraping: http://pghsportsplex.com
+2026-06-28 15:31:07,551 - INFO -     ↳ 👤 [FACEBOOK]: https://www.facebook.com/TGPSC195
+2026-06-28 15:31:09,511 - INFO -  [67/100] 🌐 [PLAYWRIGHT] Scraping: http://www.leaguelineup.com
+2026-06-28 15:31:13,665 - INFO -     ↳ 👤 [FACEBOOK]: https://www.facebook.com/leaguelineup
+2026-06-28 15:31:15,140 - INFO -  [68/100] 🌐 [PLAYWRIGHT] Scraping: http://www.phieldhouse.com
+2026-06-28 15:31:20,022 - INFO -     ↳ 👤 [FACEBOOK]: https://www.facebook.com/phieldhouse
+2026-06-28 15:31:20,051 - INFO - ⚙️ [SESSION RESET] Recycling browser to clear cache & rotate IPs...
+2026-06-28 15:31:28,965 - INFO -  [69/100] 🌐 [PLAYWRIGHT] Scraping: http://drexel.edu
+2026-06-28 15:31:44,098 - WARNING -     ↳ ⏱️ [TIMEOUT] Page took too long.
+2026-06-28 15:31:45,305 - INFO -  [70/100] 🌐 [PLAYWRIGHT] Scraping: http://www.elitesportsfactory.com
+2026-06-28 15:31:49,325 - INFO -     ↳ ⏩ [NO FB LINK] No valid Facebook anchor found.
+2026-06-28 15:31:50,409 - INFO -  [71/100] 🌐 [PLAYWRIGHT] Scraping: http://yeasports.net
+2026-06-28 15:31:51,446 - INFO -     ↳ ❌ [ERROR] Page.evaluate: Execution context was destroyed, most likely because of a navigation
