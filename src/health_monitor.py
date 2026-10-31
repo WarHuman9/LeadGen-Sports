@@ -164,13 +164,14 @@ class HealthDetector(Protocol):
 
 
 def check_health(detectors: list[Any]) -> Optional[str]:
+    reasons: list[str] = []
     for d in detectors:
         if not d.enabled:
             continue
         reason = d.check()
         if reason:
-            return f"{d.name}: {reason}"
-    return None
+            reasons.append(f"{d.name}: {reason}")
+    return " | ".join(reasons) if reasons else None
 
 
 # =====================================================================
@@ -429,6 +430,15 @@ class CPUDetector:
     comment above this class for the exact distribution that motivated
     the defaults).
 
+    Uses a frequency-based tolerance rather than a strict contiguous
+    streak: tolerates a small fraction of below-threshold dips within a
+    sustained window, rather than resetting on any single dip.  The
+    `min_fraction_above` parameter (default 0.7) controls what fraction
+    of samples within the window must be at or above threshold for the
+    window to keep growing; if the fraction drops below this floor, the
+    window resets.  This avoids false negatives from the occasional
+    momentary CPU% dip in an otherwise sustained high-CPU episode.
+
     Deliberately stays system-wide rather than per-process. This detector
     answers "is the machine, for whatever reason, under enough pressure
     that the pipeline might get killed or wedged" -- a survival question,
@@ -449,25 +459,21 @@ class CPUDetector:
         self,
         threshold_percent: float = _DEFAULT_CPU_THRESHOLD_PERCENT,
         sustained_seconds: float = _DEFAULT_CPU_SUSTAINED_SECONDS,
+        min_fraction_above: float = 0.7,
         enabled: bool = False,
     ) -> None:
         self.threshold_percent = threshold_percent
         self.sustained_seconds = sustained_seconds
+        self.min_fraction_above = min_fraction_above
         self.enabled = enabled
-        # Streak-tracking, NOT a fixed-size sample window -- see this
-        # class's docstring note on why a trim-to-window-then-check-span
-        # design is structurally broken (caught during self-testing, not
-        # part of the original design): evicting anything older than
-        # `now - sustained_seconds` on every check() means the oldest
-        # surviving sample's age can never reach sustained_seconds in
-        # steady periodic polling -- the window continuously re-trims
-        # itself right at that boundary, so the "has this window been
-        # fully elapsed" gate could never actually pass. Tracking when the
-        # CURRENT above-threshold streak began, and resetting it the
-        # moment any single sample drops below threshold, has no
-        # equivalent failure mode: streak_duration grows without bound as
-        # long as every sample keeps qualifying, with nothing evicting it
-        # out from under itself.
+        # Frequency-based streak tracking: _streak_start marks when the
+        # current sustained window began, and _streak_samples collects
+        # ALL samples (including below-threshold dips) within that window.
+        # Unlike the earlier strict-streak approach that reset on any
+        # single below-threshold sample, this version tracks what FRACTION
+        # of samples cleared the threshold (via min_fraction_above) and
+        # only resets when too few samples qualify -- tolerating occasional
+        # momentary dips within an otherwise sustained high-CPU episode.
         self._streak_start: Optional[float] = None
         self._streak_samples: list[float] = []
         if enabled and psutil is None:
@@ -489,26 +495,24 @@ class CPUDetector:
         value = psutil.cpu_percent(interval=None)
         now = time.monotonic()
 
-        if value < self.threshold_percent:
-            # A single sample under threshold breaks the streak entirely
-            # -- sustained means CONTIGUOUS, not "mostly high with the
-            # occasional dip."
-            self._streak_start = None
-            self._streak_samples = []
-            return None
-
         if self._streak_start is None:
             self._streak_start = now
             self._streak_samples = []
         self._streak_samples.append(value)
 
-        streak_duration = now - self._streak_start
-        if streak_duration >= self.sustained_seconds:
+        duration = now - self._streak_start
+        frac_above = sum(1 for v in self._streak_samples if v >= self.threshold_percent) / len(self._streak_samples)
+
+        if frac_above < self.min_fraction_above:
+            self._streak_start = None
+            self._streak_samples = []
+            return None
+
+        if duration >= self.sustained_seconds:
             avg = sum(self._streak_samples) / len(self._streak_samples)
             return (
-                f"CPU sustained >= {self.threshold_percent:.1f}% for "
-                f"{streak_duration:.1f}s (avg {avg:.1f}% across "
-                f"{len(self._streak_samples)} samples)"
+                f"CPU sustained >= {self.threshold_percent:.1f}% for {duration:.1f}s "
+                f"({frac_above*100:.0f}% of samples qualifying, avg {avg:.1f}%)"
             )
         return None
 
@@ -530,6 +534,7 @@ class PipelineHealthMonitor:
         cpu_enabled: bool = False,
         cpu_threshold_percent: float = _DEFAULT_CPU_THRESHOLD_PERCENT,
         cpu_sustained_seconds: float = _DEFAULT_CPU_SUSTAINED_SECONDS,
+        cpu_min_fraction_above: float = 0.7,
     ) -> None:
         """RAM/CPU args default to disabled + Shiv's-machine-specific
         thresholds, so `PipelineHealthMonitor()` with zero arguments still
@@ -545,6 +550,7 @@ class PipelineHealthMonitor:
             CPUDetector(
                 threshold_percent=cpu_threshold_percent,
                 sustained_seconds=cpu_sustained_seconds,
+                min_fraction_above=cpu_min_fraction_above,
                 enabled=cpu_enabled,
             ),
         ]
@@ -616,7 +622,8 @@ if __name__ == "__main__":
     print(f"   ram_threshold   enabled={ram_d.enabled} (threshold={ram_d.threshold_percent}%)")
     print(
         f"   cpu_sustained   enabled={cpu_d.enabled} "
-        f"(threshold={cpu_d.threshold_percent}%, window={cpu_d.sustained_seconds}s)"
+        f"(threshold={cpu_d.threshold_percent}%, window={cpu_d.sustained_seconds}s, "
+        f"min_fraction_above={cpu_d.min_fraction_above})"
     )
     if psutil is not None:
         print(f"   Live RAM% right now: {psutil.virtual_memory().percent:.1f}%")

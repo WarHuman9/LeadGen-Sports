@@ -265,12 +265,15 @@ TARGET_MULTIPOLYGON_LABELS: list[str] = [
 TARGET_MULTIPOLYGON: dict[str, Any] = {
     "type": "MultiPolygon",
     "coordinates": [
-        # Coordinates 1 (London area)
+        # Coordinates 1 (Cambridge area placeholder)
         [[
-           # Currently Empty as Location Query is used.
+            [0.08, 52.18],
+            [0.16, 52.18],
+            [0.16, 52.24],
+            [0.08, 52.24],
+            [0.08, 52.18],
         ]],
-        # Coordinates 2 (...)
-    ]
+    ],
 }
 
 # CUSTOM_GEOLOCATION: whichever polygon structure is ACTUALLY active this
@@ -403,6 +406,7 @@ class HealthMonitorKwargs(TypedDict):
     cpu_enabled: bool
     cpu_threshold_percent: float
     cpu_sustained_seconds: float
+    cpu_min_fraction_above: float
 
 
 # Local-machine health circuit breaker. These are pipeline safety settings,
@@ -418,7 +422,19 @@ HEALTH_MONITOR_KWARGS: HealthMonitorKwargs = {
     "cpu_enabled": False,
     "cpu_threshold_percent": 95.0,
     "cpu_sustained_seconds": 8.0,
+    "cpu_min_fraction_above": 0.7,
 }
+
+# Apify server-side run timeout per actor -- passed as `run_timeout` to
+# _start_and_track() in pipeline_session.py.  After this duration, Apify
+# forcibly stops the run (status TIMED-OUT).  Protects against runaway
+# spend; the client's own wait_for_finish() naturally returns once the
+# server-side timeout fires, so no separate client-side ceiling is needed.
+# Values are in minutes for readability; converted to timedelta at the
+# call site.
+MAPS_RUN_TIMEOUT_MINUTES: int = 20
+INSTAGRAM_RUN_TIMEOUT_MINUTES: int = 20
+ADS_RUN_TIMEOUT_MINUTES: int = 5
 
 # Output CSV filename base -- auto-increments if the file already exists
 # (filtered_sports_academies.csv -> filtered_sports_academies(1).csv,
@@ -440,6 +456,7 @@ def _validate_health_monitor_config(settings: HealthMonitorKwargs) -> None:
     expected_keys = {
         "ram_enabled", "ram_threshold_percent", "cpu_enabled",
         "cpu_threshold_percent", "cpu_sustained_seconds",
+        "cpu_min_fraction_above",
     }
     if set(settings) != expected_keys:
         raise ConfigError(
@@ -464,6 +481,14 @@ def _validate_health_monitor_config(settings: HealthMonitorKwargs) -> None:
             or sustained_seconds <= 0):
         raise ConfigError(
             "❌ config.py: HEALTH_MONITOR_KWARGS['cpu_sustained_seconds'] must be greater than zero."
+        )
+
+    min_frac = settings["cpu_min_fraction_above"]
+    if (isinstance(min_frac, bool)
+            or not isinstance(min_frac, (int, float))
+            or not 0 < min_frac <= 1.0):
+        raise ConfigError(
+            "❌ config.py: HEALTH_MONITOR_KWARGS['cpu_min_fraction_above'] must be a number in (0, 1.0]."
         )
 
 

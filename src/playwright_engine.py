@@ -163,10 +163,63 @@ BLOCK_EXTENSIONS = re.compile(
     re.IGNORECASE,
 )
 
-FB_SKIP_PATHS     = ["/tr", "/sharer", "/share", "/plugins", "/policy", "/policies",
-                      "/login", "/wix", "/dialog", "/legal", "/help", "/squarespace"]
-IG_SKIP_PATHS     = ["/p/", "/reel", "/tv/", "/stories/", "/embed", "/squarespace", "/wix"]
+FB_SKIP_PATH_PREFIXES = ["/tr", "/sharer", "/share", "/plugins", "/policy", "/policies",
+                          "/login", "/dialog", "/legal", "/help"]
+FB_SKIP_SUBSTRINGS    = ["/wix", "/squarespace"]
+
+IG_SKIP_PATH_PREFIXES = ["/p/", "/reel", "/tv/", "/stories/"]
+IG_SKIP_SUBSTRINGS    = ["/embed", "/squarespace", "/wix"]
+
+
+def _should_skip_social_href(href: str, path_prefixes: list[str], substrings: list[str]) -> bool:
+    """Anchored path-prefix check for feature-page URLs + unanchored
+    substring check for website-builder leftover links.  Fixes false-
+    positives like '/tr' matching inside 'facebook.com/travissportsacademy'
+    and '/help' matching inside 'facebook.com/helpfulgolf'."""
+    href_lower = href.lower()
+    if any(s in href_lower for s in substrings):
+        return True
+    try:
+        path = urlparse(href).path.lower()
+    except Exception:
+        return False
+    for p in path_prefixes:
+        p_clean = p.rstrip("/")
+        if path == p_clean or path.startswith(p_clean + "/"):
+            return True
+    return False
+
+
 IG_SKIP_USERNAMES = ["accounts", "explore", "developer", "about", "legal", "wix", "squarespace", "blog", "linktree", "stories", "reel", "tv", "help", "press", "privacy", "terms"]
+
+# Pre-filtering rules — junk/institutional domains skipped before the
+# browser ever opens.  Moved here from main_apify.py so the main
+# script stays a pure integration layer (implementation_plan_5 alignment).
+# Dot-prefixed entries are TLD-anchored; non-dot entries are substring
+# checks against the domain only (not the full URL).
+SKIP_WEBSITE_KEYWORDS = [".gov", ".top", ".xyz", ".wtf", "ymca", "gotimmy", ".lol"]
+
+
+def _is_skippable_website(raw_website: str, skip_keywords: Optional[list[str]] = None) -> bool:
+    """Anchor dot-prefixed keywords to the actual TLD position
+    (domain.endswith(kw)); leave non-dot-prefixed keywords as substring
+    checks against the domain.  Fixes a confirmed false-positive from a
+    real run: 'topshottennis.net' was wrongly skipped because '.top'
+    matched the literal characters 't-o-p' inside the business name."""
+    if skip_keywords is None:
+        skip_keywords = SKIP_WEBSITE_KEYWORDS
+    lowered = raw_website.lower()
+    domain = urlparse(lowered if "://" in lowered else f"//{lowered}").netloc
+    domain = domain.split(":")[0]  # strip a port if present
+
+    for kw in skip_keywords:
+        if kw.startswith("."):
+            if domain.endswith(kw):
+                return True
+        else:
+            if kw in domain:
+                return True
+    return False
 
 ig_profile_regex = re.compile(r"instagram\.com/([a-zA-Z0-9_\.]+)")
 
@@ -241,7 +294,16 @@ SCOPED_SELECTORS = [
     '[class*="footer" i] a[href]', '[class*="nav" i] a[href]',
     '[class*="menu" i] a[href]', '[class*="social" i] a[href]',
     '[class*="follow" i] a[href]',
+    "a[href]",  # catch-all for Tailwind/CSR sites; must stay LAST
 ]
+
+NAVIGATIONAL_REGIONS = {
+    "footer a[href]", "header a[href]", "nav a[href]",
+    '[role="navigation"] a[href]', '[role="contentinfo"] a[href]',
+    '[class*="footer" i] a[href]', '[class*="nav" i] a[href]',
+    '[class*="menu" i] a[href]', '[class*="social" i] a[href]',
+    '[class*="follow" i] a[href]',
+}
 
 SCOPED_SCAN_JS = """
 (selectors) => {
@@ -268,7 +330,7 @@ SCOPED_SCAN_JS = """
 MAX_SECTION_TEXT_CANDIDATES = 5
 
 # ---- Watchdog ----
-HOMEPAGE_WATCHDOG_SECONDS = 40   # covers goto() + jitter scroll + scoped scan
+HOMEPAGE_WATCHDOG_SECONDS = 60   # covers goto() + social-link poll + adaptive wait + jitter scroll + scoped scan
 FALLBACK_WATCHDOG_SECONDS = 25   # applied individually per sitemap/section/guessed-path visit
 
 
@@ -606,7 +668,7 @@ def extract_signals_from_scoped_anchors(anchors: list[dict[str, Any]], base_doma
         href_lower = href.lower()
 
         if not instagram_url and "instagram.com" in href_lower:
-            if not any(x in href_lower for x in IG_SKIP_PATHS):
+            if not _should_skip_social_href(href, IG_SKIP_PATH_PREFIXES, IG_SKIP_SUBSTRINGS):
                 match = ig_profile_regex.search(href)
                 if match:
                     username = match.group(1).split('?')[0].strip("/").lower()
@@ -620,13 +682,15 @@ def extract_signals_from_scoped_anchors(anchors: list[dict[str, Any]], base_doma
                         scoped_region_hit = scoped_region_hit or region
 
         if not facebook_url and "facebook.com" in href_lower:
-            if not any(x in href_lower for x in FB_SKIP_PATHS):
+            if not _should_skip_social_href(href, FB_SKIP_PATH_PREFIXES, FB_SKIP_SUBSTRINGS):
                 candidate = extract_facebook_url(href)
                 if candidate:
                     facebook_url = candidate
                     scoped_region_hit = scoped_region_hit or region
 
-        if _is_same_domain(href, base_domain) and href_lower not in seen_section_urls:
+        if (region in NAVIGATIONAL_REGIONS
+                and _is_same_domain(href, base_domain)
+                and href_lower not in seen_section_urls):
             text_lower = text.lower()
             hit_kw = next((kw for kw in SECTION_KEYWORDS if kw in text_lower), None)
             if hit_kw:
@@ -647,6 +711,45 @@ def extract_signals_from_scoped_anchors(anchors: list[dict[str, Any]], base_doma
         "scoped_region_hit": scoped_region_hit,
         "section_candidates": section_candidates[:MAX_SECTION_TEXT_CANDIDATES],
     }
+
+
+def _wait_for_social_links_or_settle(page: Any, max_wait_seconds: float = 12.0) -> bool:
+    """Poll for an IG/FB link appearing anywhere in the DOM with a bounded
+    budget, early-exiting the moment one is found.  Costs near-zero on
+    sites that load normally; only spends extra time on genuinely slow-
+    rendering pages.  Called right after goto() succeeds, before scroll."""
+    deadline = time.monotonic() + max_wait_seconds
+    while time.monotonic() < deadline:
+        try:
+            found = page.evaluate(
+                '() => !!document.querySelector(\'a[href*="instagram.com"], a[href*="facebook.com"]\')'
+            )
+        except Exception:
+            return False
+        if found:
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def _adaptive_content_wait(page: Any, max_extension_seconds: float = 7.0) -> float:
+    """Extend the wait only while anchor count is still changing between
+    checks; stop the moment it stabilizes.  Hard-capped so a site with
+    endless background DOM churn can't consume unbounded time."""
+    start = time.monotonic()
+    last_count = -1
+    elapsed = 0.0
+    while elapsed < max_extension_seconds:
+        try:
+            current_count = page.evaluate("() => document.querySelectorAll('a[href]').length")
+        except Exception:
+            break
+        if current_count == last_count:
+            break  # stabilized -- stop waiting
+        last_count = current_count
+        time.sleep(1.0)
+        elapsed = time.monotonic() - start
+    return time.monotonic() - start
 
 
 def playwright_visit_and_scan(context: Any, url: str) -> dict[str, Any]:
@@ -670,6 +773,11 @@ def playwright_visit_and_scan(context: Any, url: str) -> dict[str, Any]:
         if not response or response.status != 200:
             status = response.status if response else "No Response"
             return {"ok": False, "http_status": status, "error": None}
+
+        _wait_for_social_links_or_settle(page)
+        extra = _adaptive_content_wait(page)
+        if extra > 1.0:
+            logger.info(f"    ↳ ⏳ [ADAPTIVE WAIT] Extended {extra:.1f}s -- anchor count still growing")
 
         run_jittery_scroll(page)
 

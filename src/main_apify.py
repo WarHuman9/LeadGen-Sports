@@ -7,7 +7,7 @@ import random
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional, cast
 from urllib.parse import urlparse
@@ -35,6 +35,7 @@ from playwright_engine import (
     PlaywrightWorker,
     resolve_social_links,
     ig_profile_regex,
+    _is_skippable_website,
 )
 import health_monitor
 import pipeline_session
@@ -108,12 +109,9 @@ APIFY_API_TOKEN = _require_env("APIFY_API_TOKEN")
 
 OUTPUT_EXT = ".csv"   # stays here -- see comment above.
 
-# Pre-filtering rules — junk/institutional domains skipped before the
-# browser ever opens, so they never reach playwright_engine.py at all.
-# Item 5: this now runs directly against raw_website (a substring check
-# needs no parsed URL) -- the engine owns all scheme/domain/path
-# interpretation exclusively from here on.
-SKIP_WEBSITE_KEYWORDS = [".gov", ".top", ".xyz", ".wtf", "ymca", "gotimmy", ".lol"]
+# Pre-filtering rules (SKIP_WEBSITE_KEYWORDS and _is_skippable_website)
+# moved to playwright_engine.py so the engine owns URL validation
+# and this main script stays a clean integration layer.
 
 # Instagram profile category/bio keywords that flag NGO or non-commercial
 # pages — pipeline-level business filtering, unrelated to how the
@@ -157,20 +155,25 @@ def flush_dns_cache() -> None: # type: ignore[unreachable]
 # =====================================================================
 def _parse_instagram_timestamp(raw_timestamp: Any) -> Optional[datetime]:
     """Parse an Instagram post timestamp without allowing one bad value to
-    abort the whole lead-qualification run."""
-    if not isinstance(raw_timestamp, str) or not raw_timestamp:
+    abort the whole lead-qualification run. Handles ISO-format strings and
+    epoch integers/floats (defensive -- see improvement_plan_1 A5)."""
+    if isinstance(raw_timestamp, bool) or raw_timestamp in (None, ""):
         return None
-    try:
-        parsed = datetime.fromisoformat(raw_timestamp.replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        logging.warning(f"[IG INVALID TIMESTAMP] Ignoring malformed timestamp: {raw_timestamp!r}")
-        return None
-
-    # An offset-less timestamp is ambiguous. Treat it as UTC so subtraction
-    # against current_time (which is UTC) remains safe and deterministic.
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed
+    if isinstance(raw_timestamp, str):
+        try:
+            parsed = datetime.fromisoformat(raw_timestamp.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed
+        except (TypeError, ValueError):
+            pass  # not ISO-shaped -- fall through, might be a numeric-string epoch
+    if isinstance(raw_timestamp, (int, float, str)):
+        try:
+            return datetime.fromtimestamp(float(raw_timestamp), tz=timezone.utc)
+        except (TypeError, ValueError, OSError, OverflowError):
+            pass
+    logging.warning(f"[IG INVALID TIMESTAMP] Ignoring malformed timestamp: {raw_timestamp!r}")
+    return None
 
 
 def _compute_tier(record: dict[str, Any]) -> int:
@@ -280,6 +283,7 @@ def main() -> None:
         cpu_enabled=config.HEALTH_MONITOR_KWARGS["cpu_enabled"],
         cpu_threshold_percent=config.HEALTH_MONITOR_KWARGS["cpu_threshold_percent"],
         cpu_sustained_seconds=config.HEALTH_MONITOR_KWARGS["cpu_sustained_seconds"],
+        cpu_min_fraction_above=config.HEALTH_MONITOR_KWARGS["cpu_min_fraction_above"],
     )
     _check_health(health, "startup")
     
@@ -308,9 +312,25 @@ def main() -> None:
     if config.CATEGORY_FILTER_WORDS:
         maps_run_input["categoryFilterWords"] = config.CATEGORY_FILTER_WORDS
     
-    places = session.resolve_maps_dataset(client, maps_run_input)
-    health.record_network_result(True)
+    try:
+        places = session.resolve_maps_dataset(
+            client,
+            maps_run_input,
+            stream_logs=True,
+            run_timeout=timedelta(minutes=config.MAPS_RUN_TIMEOUT_MINUTES),
+        )
+        health.record_network_result(True)
+    except CircuitBreakerTriggered:
+        raise
+    except Exception as e:
+        health.record_network_result(False)
+        logging.error(f"❌ Maps dataset resolution failed: {e}")
+        raise
     _check_health(health, "after Maps")
+
+    if not places:
+        logging.warning("⚠️ Maps returned zero places for this query — check search keywords/location before trusting an empty CSV.")
+
     logging.info(f"✅ Extracted {len(places)} records from Maps. Starting Playwright social-link crawler...")
     
     # =====================================================================
@@ -438,8 +458,8 @@ def main() -> None:
             elif worker is None:
                 playwright_status = "Skipped - No Browser Available"
     
-            # Item 5: pre-filter runs directly on raw_website -- no parsing.
-            elif any(kw in raw_website.lower() for kw in SKIP_WEBSITE_KEYWORDS):
+            # Item 5 / F1: pre-filter delegated to playwright_engine's _is_skippable_website.
+            elif _is_skippable_website(raw_website):
                 logging.info(f"  [{idx}/{len(places)}] 🚫 Skipping institutional/junk domain: {raw_website}")
                 playwright_status = "Skipped - Institutional Domain"
     
@@ -558,13 +578,18 @@ def main() -> None:
                 # sitemap vs section-text vs nothing.
                 "Fallback Status":       fallback_status,
             }
-            session.record_step2_result(place_id, {
-                "instagram_url": instagram_url,
-                "instagram_handle": instagram_handle,
-                "facebook_url": facebook_url,
-                "playwright_status": playwright_status,
-                "fallback_status": fallback_status,
-            })
+            # A3: "No Browser Available" is a fact about the local
+            # environment at this moment, not the site -- leave the record
+            # genuinely pending so a future --resume retries it once a
+            # browser is available.
+            if playwright_status != "Skipped - No Browser Available":
+                session.record_step2_result(place_id, {
+                    "instagram_url": instagram_url,
+                    "instagram_handle": instagram_handle,
+                    "facebook_url": facebook_url,
+                    "playwright_status": playwright_status,
+                    "fallback_status": fallback_status,
+                })
             _check_health(health, f"after Step 2 checkpoint for {name!r}")
     
     finally:
@@ -635,7 +660,11 @@ def main() -> None:
         try:
             # PipelineSession owns directUrls/resultsLimit construction,
             # start+persist+wait, and missing-handle reconciliation.
-            ig_results = session.resolve_instagram_batch(client, config.INSTAGRAM_RUN_INPUT)
+            ig_results = session.resolve_instagram_batch(
+                client,
+                config.INSTAGRAM_RUN_INPUT,
+                run_timeout=timedelta(minutes=config.INSTAGRAM_RUN_TIMEOUT_MINUTES),
+            )
             health.record_network_result(True)
             _check_health(health, "after Instagram batch")
     
@@ -909,7 +938,11 @@ def main() -> None:
             else:
                 try:
                     ad_results = session.resolve_ads_call(
-                        client, place_id, fb_link, config.ADS_RUN_INPUT,
+                        client,
+                        place_id,
+                        fb_link,
+                        config.ADS_RUN_INPUT,
+                        run_timeout=timedelta(minutes=config.ADS_RUN_TIMEOUT_MINUTES),
                     )
                     health.record_network_result(True)
                     _check_health(health, f"after Ads call for {name!r}")
@@ -929,28 +962,28 @@ def main() -> None:
                         record["Running Active Ads"]    = "undefined"
                         record["Ad ID (Manual Verify)"] = "Empty dataset returned"
                         logging.info(f"    ↳ [UNDEFINED] {name} — empty dataset returned.")
-    
-                    elif ad_results[0].get("errorCode") == "ADS_NOT_FOUND":
-                        # Confident, explicit signal — page is valid but has no active ads
-                        record["Running Active Ads"] = "No (Page Exists, No Active Ads)"
-                        logging.info(f"    ↳ [ADS = No] {name}")
-    
-                    elif ad_results[0].get("errorCode") == "PAGE_NOT_FOUND":
-                        record["Running Active Ads"] = "Other (PAGE_NOT_FOUND)"
-                        logging.info(f"    ↳ [PAGE NOT FOUND] {name}")
-    
-                    elif ad_results[0].get("errorCode") == "PAGE_PRIVATE":
-                        record["Running Active Ads"] = "Other (PAGE_PRIVATE)"
-                        logging.info(f"    ↳ [PAGE PRIVATE] {name}")
-    
+
                     else:
-                        # Real ad items — require a known ID field to confirm
+                        # A1 fix: scan ALL items for a valid Ad ID first,
+                        # before checking ad_results[0]'s error code --
+                        # a valid ad later in the array shouldn't be missed
+                        # just because index 0 carries an error.
                         actual_ads = [item for item in ad_results if any(item.get(f) for f in config.AD_ID_FIELDS)]
                         if actual_ads:
                             ad_id = next((actual_ads[0].get(f) for f in config.AD_ID_FIELDS if actual_ads[0].get(f)), "")
                             record["Running Active Ads"]    = "Yes"
                             record["Ad ID (Manual Verify)"] = str(ad_id)
                             logging.info(f"    ↳ [ADS = Yes] {name} — Ad ID: {ad_id}")
+                        elif ad_results[0].get("errorCode") == "ADS_NOT_FOUND":
+                            # Confident, explicit signal — page is valid but has no active ads
+                            record["Running Active Ads"] = "No (Page Exists, No Active Ads)"
+                            logging.info(f"    ↳ [ADS = No] {name}")
+                        elif ad_results[0].get("errorCode") == "PAGE_NOT_FOUND":
+                            record["Running Active Ads"] = "Other (PAGE_NOT_FOUND)"
+                            logging.info(f"    ↳ [PAGE NOT FOUND] {name}")
+                        elif ad_results[0].get("errorCode") == "PAGE_PRIVATE":
+                            record["Running Active Ads"] = "Other (PAGE_PRIVATE)"
+                            logging.info(f"    ↳ [PAGE PRIVATE] {name}")
                         else:
                             # Non-empty, no recognized error code, no
                             # recognized ID field — genuinely unrecognized shape
@@ -970,6 +1003,8 @@ def main() -> None:
                 record["Running Active Ads"] = "Skipped (Failed IG Filter)"
 
         _checkpoint_step4(place_id, record)
+
+    logging.info("✅ Step 4 completed.")
     
     # =====================================================================
     # Step 5: Export — filename auto-increments if it already exists

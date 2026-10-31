@@ -184,7 +184,7 @@ import logging
 import shutil
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
@@ -391,6 +391,8 @@ def _start_and_track(
     run_input: Optional[dict[str, Any]],
     existing_run_id: Optional[str],
     persist_run_id: Callable[[str], None],
+    stream_logs: bool = False,
+    run_timeout: Optional[timedelta] = None,
 ) -> Any:
     """A5: start() + persist + wait_for_finish(), resumable -- the one
     shared helper backing all three call sites (Maps Step 1, Instagram
@@ -414,7 +416,10 @@ def _start_and_track(
             f"starting a new one."
         )
     else:
-        run = client.actor(actor_id).start(run_input=run_input)
+        start_kwargs: dict[str, Any] = {"run_input": run_input}
+        if run_timeout is not None:
+            start_kwargs["run_timeout"] = run_timeout
+        run = client.actor(actor_id).start(**start_kwargs)
         run_id = _extract_run_id(run)
         if not run_id:
             raise RuntimeError(
@@ -424,7 +429,15 @@ def _start_and_track(
         persist_run_id(run_id)
         logger.info(f"[SESSION] Started {actor_id} run {run_id}, persisted before waiting.")
 
-    return client.run(run_id).wait_for_finish()
+    run_client = client.run(run_id)
+    if stream_logs:
+        try:
+            actor_logger = logging.getLogger("apify." + actor_id.replace("/", "."))
+            with run_client.get_streamed_log(to_logger=actor_logger, from_start=True):
+                return run_client.wait_for_finish()
+        except Exception as e:
+            logger.warning(f"[SESSION] Log streaming for {actor_id} failed to start ({e}) -- continuing without it.")
+    return run_client.wait_for_finish()
 
 
 def _stable_fallback_place_id(item: dict[str, Any]) -> str:
@@ -891,7 +904,13 @@ class PipelineSession:
     # -----------------------------------------------------------------
     # Step 1 / Maps -- A4, A4c, A5 all converge here.
     # -----------------------------------------------------------------
-    def resolve_maps_dataset(self, client: Any, run_input: dict[str, Any]) -> list[dict[str, Any]]:
+    def resolve_maps_dataset(
+        self,
+        client: Any,
+        run_input: dict[str, Any],
+        stream_logs: bool = False,
+        run_timeout: Optional[timedelta] = None,
+    ) -> list[dict[str, Any]]:
         row = self._get_meta_row()
 
         if row["maps_places_fetched_at"]:
@@ -946,7 +965,15 @@ class PipelineSession:
             client, "compass/crawler-google-places", run_input,
             existing_run_id=row["maps_run_id"],
             persist_run_id=lambda rid: self._set_meta(maps_run_id=rid),
+            stream_logs=stream_logs,
+            run_timeout=run_timeout,
         )
+        status = finished.get("status") if isinstance(finished, dict) else getattr(finished, "status", None)
+        if status and status not in ("SUCCEEDED", "FINISHED"):
+            logger.warning(
+                f"[SESSION] Maps run finished with status '{status}' (not SUCCEEDED) -- "
+                f"proceeding with whatever partial dataset is available."
+            )
         dataset_id = _extract_dataset_id(finished)
         if not dataset_id:
             raise RuntimeError(
@@ -1129,6 +1156,14 @@ class PipelineSession:
             (dataset_id, json.dumps(items), _now(), row_id),
         )
         self._conn.commit()
+        row = self._conn.execute(
+            "SELECT requested_handles_json FROM instagram_batch WHERE id=?", (row_id,)
+        ).fetchone()
+        requested_count = len(json.loads(row["requested_handles_json"])) if row else "?"
+        logger.info(
+            f"[SESSION] Instagram batch row {row_id} complete -- dataset {dataset_id}, "
+            f"{len(items)} of {requested_count} requested profile(s) returned."
+        )
 
     def _load_all_instagram_results(self) -> list[dict[str, Any]]:
         rows = self._conn.execute(
@@ -1140,7 +1175,11 @@ class PipelineSession:
         return all_items
 
     def resolve_instagram_batch(
-        self, client: Any, run_input_base: dict[str, Any]
+        self,
+        client: Any,
+        run_input_base: dict[str, Any],
+        stream_logs: bool = False,
+        run_timeout: Optional[timedelta] = None,
     ) -> list[dict[str, Any]]:
         expected = self._expected_instagram_handles()
         if not expected:
@@ -1156,7 +1195,15 @@ class PipelineSession:
             finished = _start_and_track(
                 client, "apify/instagram-scraper", run_input=None,
                 existing_run_id=in_flight["run_id"], persist_run_id=lambda rid: None,
+                stream_logs=stream_logs,
+                run_timeout=run_timeout,
             )
+            status = finished.get("status") if isinstance(finished, dict) else getattr(finished, "status", None)
+            if status and status not in ("SUCCEEDED", "FINISHED"):
+                logger.warning(
+                    f"[SESSION] In-flight Instagram batch run finished with status '{status}' (not SUCCEEDED) -- "
+                    f"proceeding with whatever partial dataset is available."
+                )
             dataset_id = _extract_dataset_id(finished)
             if dataset_id:
                 self._complete_instagram_batch_row(in_flight["id"], dataset_id, client)
@@ -1244,7 +1291,15 @@ class PipelineSession:
                 client, "apify/instagram-scraper", run_input,
                 existing_run_id=None,
                 persist_run_id=lambda rid, row_id=row_id: self._set_instagram_batch_run_id(row_id, rid),
+                stream_logs=stream_logs,
+                run_timeout=run_timeout,
             )
+            status = finished.get("status") if isinstance(finished, dict) else getattr(finished, "status", None)
+            if status and status not in ("SUCCEEDED", "FINISHED"):
+                logger.warning(
+                    f"[SESSION] Instagram batch run finished with status '{status}' (not SUCCEEDED) -- "
+                    f"proceeding with whatever partial dataset is available."
+                )
             dataset_id = _extract_dataset_id(finished)
             if not dataset_id:
                 raise RuntimeError(
@@ -1289,7 +1344,13 @@ class PipelineSession:
         self._conn.commit()
 
     def resolve_ads_call(
-        self, client: Any, place_id: str, fb_link: str, run_input_base: dict[str, Any]
+        self,
+        client: Any,
+        place_id: str,
+        fb_link: str,
+        run_input_base: dict[str, Any],
+        stream_logs: bool = False,
+        run_timeout: Optional[timedelta] = None,
     ) -> Optional[list[dict[str, Any]]]:
         """Returns the raw ad_results list (or None if no dataset could be
         resolved), the exact shape main_apify.py's existing Step 4
@@ -1304,7 +1365,15 @@ class PipelineSession:
             client, "curious_coder/facebook-ads-library-scraper", run_input,
             existing_run_id=existing_run_id,
             persist_run_id=lambda rid: self._set_place_ads_run_id(place_id, rid),
+            stream_logs=stream_logs,
+            run_timeout=run_timeout,
         )
+        status = finished.get("status") if isinstance(finished, dict) else getattr(finished, "status", None)
+        if status and status not in ("SUCCEEDED", "FINISHED"):
+            logger.warning(
+                f"[SESSION] Ads run for {place_id} finished with status '{status}' -- "
+                f"proceeding with whatever partial dataset is available."
+            )
         dataset_id = _extract_dataset_id(finished)
         if not dataset_id:
             return None
@@ -1317,6 +1386,14 @@ class PipelineSession:
     # the delta this invocation itself processed.
     # -----------------------------------------------------------------
     def rehydrate_local_records(self) -> dict[str, dict[str, Any]]:
+        orphaned = self._get_all_orphaned_instagram_batch_rows()
+        if orphaned:
+            total_handles = sum(len(json.loads(r["requested_handles_json"])) for r in orphaned)
+            logger.warning(
+                f"[SESSION] {len(orphaned)} Instagram batch request row(s) ({total_handles} handle(s)) "
+                f"still have no run_id or results at rehydration time -- this is the final view before "
+                f"CSV export. Re-run with --igDatasetID if a real Apify run exists for them."
+            )
         rows = self._conn.execute("SELECT * FROM places").fetchall()
         records: dict[str, dict[str, Any]] = {}
         for row in rows:
