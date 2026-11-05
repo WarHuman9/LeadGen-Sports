@@ -1,3 +1,7 @@
 *.geojson
 *.pyc
+*.csv
 .env
+
+logs/
+sessions/
