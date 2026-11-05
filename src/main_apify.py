@@ -297,7 +297,7 @@ def main() -> None:
     # comes straight from config.py -- copied, never mutated in place,
     # since config.MAPS_RUN_INPUT is a module-level value shared across
     # the whole process (see config.py's own docstring on this point).
-    maps_run_input: dict[str, Any] = dict(config.MAPS_RUN_INPUT)
+    maps_run_input = cast(dict[str, Any], config.MAPS_RUN_INPUT).copy()
     
     # Exactly one of these two is already guaranteed set/unset correctly
     # by config.py's own import-time validation -- a plain if/else here

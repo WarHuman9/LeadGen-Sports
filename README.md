@@ -1,18 +1,21 @@
+#
+
+# Lead Generation Pipeline  ![Colab](https://img.shields.io/badge/Python%20&%20Apify-gold?style=for-the-badge&logo=python)
+
+
 <p align="center">
   <img src="X_Other/logo-square.png" alt="LeadGen Sports logo" width="256" height="256">
 </p>
 
-# Lead Generation Pipeline (Apify)
-
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://python.org)
-[![Playwright](https://img.shields.io/badge/Playwright-Browser%20Automation-2EAD33?logo=playwright&logoColor=white)](https://playwright.dev)
+[![Playwright](https://img.shields.io/badge/Playwright-Browser%20Automation-2EAD33?logo=nodedotjs&logoColor=white)](https://playwright.dev)
 [![Apify](https://img.shields.io/badge/Apify-Actors-FF5A1F?logo=apify&logoColor=white)](https://apify.com)
 [![Windows-first](https://img.shields.io/badge/Workflow-Windows%20Local%20Runs-0078D4?logo=microsoft&logoColor=white)](https://www.microsoft.com/windows)
 [![License: PolyForm Noncommercial](https://img.shields.io/badge/License-PolyForm%20Noncommercial%201.0.0-blue.svg?style=flat-square)](LICENSE)
 
 A resilient Python pipeline for finding and qualifying sports-academy leads by combining Google Maps discovery, Apify social-data actors, and a smart Playwright fallback that crawls business websites for Instagram and Facebook links. The project is designed to be crash-safe, resumable, and practical for a solo local machine rather than a fully managed cloud workflow.
 
-**(This project was first separately built as a private repository)**
+**(This project was first built separately as a private repository)**
 
 ## Why this project exists
 
