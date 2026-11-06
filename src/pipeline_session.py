@@ -178,6 +178,7 @@ WHAT'S STILL UNVERIFIED (flagged in-line where it matters, not hidden)
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -224,6 +225,13 @@ class SessionConfigMismatchError(Exception):
     this session's corresponding work began, per A6. Maps config is
     deliberately NEVER a source of this error -- see
     PipelineSession._validate_config_drift()'s docstring for why."""
+
+
+class MapsRunFailedEmptyError(RuntimeError):
+    """Raised when Step 1 (Maps run) ends with a non-SUCCEEDED status (e.g. FAILED,
+    ABORTED, TIMED-OUT) and produces zero places. Such runs cannot proceed, and
+    because maps_run_id is write-once, the session cannot be resumed; the user
+    must start a fresh session (FX-4 / D-3)."""
 
 
 # =====================================================================
@@ -359,6 +367,18 @@ _MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
 }
 
 
+def _run_status(run_obj: Any) -> Optional[str]:
+    """FX-11.1: Extract and normalize status string from an Apify run object or dict,
+    handling str, Enum (.value), or missing attributes uniformly."""
+    if not run_obj:
+        return None
+    raw = run_obj.get("status") if isinstance(run_obj, dict) else getattr(run_obj, "status", None)
+    if raw is None:
+        return None
+    val = getattr(raw, "value", raw)
+    return str(val).upper()
+
+
 def _extract_run_id(run_obj: Any) -> Optional[str]:
     """See this module's docstring, 'What's still unverified' -- mirrors
     main_apify.py's proven getattr-based access, with a dict
@@ -430,14 +450,14 @@ def _start_and_track(
         logger.info(f"[SESSION] Started {actor_id} run {run_id}, persisted before waiting.")
 
     run_client = client.run(run_id)
-    if stream_logs:
-        try:
-            actor_logger = logging.getLogger("apify." + actor_id.replace("/", "."))
-            with run_client.get_streamed_log(to_logger=actor_logger, from_start=True):
-                return run_client.wait_for_finish()
-        except Exception as e:
-            logger.warning(f"[SESSION] Log streaming for {actor_id} failed to start ({e}) -- continuing without it.")
-    return run_client.wait_for_finish()
+    with contextlib.ExitStack() as stack:
+        if stream_logs:
+            try:
+                actor_logger = logging.getLogger("apify." + actor_id.replace("/", "."))
+                stack.enter_context(run_client.get_streamed_log(to_logger=actor_logger, from_start=True))
+            except Exception as e:
+                logger.warning(f"[SESSION] Log streaming for {actor_id} failed to start ({e}) -- continuing without it.")
+        return run_client.wait_for_finish()
 
 
 def _stable_fallback_place_id(item: dict[str, Any]) -> str:
@@ -968,7 +988,7 @@ class PipelineSession:
             stream_logs=stream_logs,
             run_timeout=run_timeout,
         )
-        status = finished.get("status") if isinstance(finished, dict) else getattr(finished, "status", None)
+        status = _run_status(finished)
         if status and status not in ("SUCCEEDED", "FINISHED"):
             logger.warning(
                 f"[SESSION] Maps run finished with status '{status}' (not SUCCEEDED) -- "
@@ -983,6 +1003,17 @@ class PipelineSession:
             self._set_meta(maps_dataset_id=dataset_id)
 
         places = self._reconcile_places(client, dataset_id)
+
+        # FX-4 / D-3: If Maps finished with non-SUCCEEDED status AND returned 0 places,
+        # fail loudly before stamping maps_places_fetched_at. This avoids completing Step 1
+        # with zero data and permanently poisoning the session.
+        if status in ("FAILED", "ABORTED", "TIMED-OUT") and not places:
+            run_id_val = row.get("maps_run_id") or _extract_run_id(finished)
+            raise MapsRunFailedEmptyError(
+                f"❌ Maps run {run_id_val} ended with status '{status}' and produced 0 places. "
+                f"Step 1 cannot proceed. Because this run produced no data and maps_run_id is "
+                f"write-once, this session cannot be resumed. Please start a fresh session (without --resume)."
+            )
 
         if is_empty_resume:
             origin = "resumed_empty"
@@ -1013,11 +1044,14 @@ class PipelineSession:
     def get_pending_place_ids(self, step: int) -> list[str]:
         if step == 2:
             col = "step2_completed_at"
+            sql = f"SELECT place_id FROM places WHERE {col} IS NULL"
         elif step == 4:
-            col = "step4_completed_at"
+            # FX-2a: exclude places that never completed Step 2 (e.g. skipped due to
+            # no browser available), so Step 4 doesn't prematurely mark them done.
+            sql = "SELECT place_id FROM places WHERE step4_completed_at IS NULL AND step2_completed_at IS NOT NULL"
         else:
             raise ValueError(f"get_pending_place_ids: step must be 2 or 4, got {step!r}")
-        rows = self._conn.execute(f"SELECT place_id FROM places WHERE {col} IS NULL").fetchall()
+        rows = self._conn.execute(sql).fetchall()
         return [r["place_id"] for r in rows]
 
     def record_step2_result(self, place_id: str, result: dict[str, Any]) -> None:
@@ -1198,7 +1232,7 @@ class PipelineSession:
                 stream_logs=stream_logs,
                 run_timeout=run_timeout,
             )
-            status = finished.get("status") if isinstance(finished, dict) else getattr(finished, "status", None)
+            status = _run_status(finished)
             if status and status not in ("SUCCEEDED", "FINISHED"):
                 logger.warning(
                     f"[SESSION] In-flight Instagram batch run finished with status '{status}' (not SUCCEEDED) -- "
@@ -1294,7 +1328,7 @@ class PipelineSession:
                 stream_logs=stream_logs,
                 run_timeout=run_timeout,
             )
-            status = finished.get("status") if isinstance(finished, dict) else getattr(finished, "status", None)
+            status = _run_status(finished)
             if status and status not in ("SUCCEEDED", "FINISHED"):
                 logger.warning(
                     f"[SESSION] Instagram batch run finished with status '{status}' (not SUCCEEDED) -- "
@@ -1368,7 +1402,7 @@ class PipelineSession:
             stream_logs=stream_logs,
             run_timeout=run_timeout,
         )
-        status = finished.get("status") if isinstance(finished, dict) else getattr(finished, "status", None)
+        status = _run_status(finished)
         if status and status not in ("SUCCEEDED", "FINISHED"):
             logger.warning(
                 f"[SESSION] Ads run for {place_id} finished with status '{status}' -- "
@@ -1388,12 +1422,19 @@ class PipelineSession:
     def rehydrate_local_records(self) -> dict[str, dict[str, Any]]:
         orphaned = self._get_all_orphaned_instagram_batch_rows()
         if orphaned:
-            total_handles = sum(len(json.loads(r["requested_handles_json"])) for r in orphaned)
-            logger.warning(
-                f"[SESSION] {len(orphaned)} Instagram batch request row(s) ({total_handles} handle(s)) "
-                f"still have no run_id or results at rehydration time -- this is the final view before "
-                f"CSV export. Re-run with --igDatasetID if a real Apify run exists for them."
-            )
+            # FX-8: only warn if the orphaned rows' requested handles have not
+            # already been resolved in a subsequent supplemental batch.
+            processed = self._processed_instagram_handles()
+            unresolved_handles: set[str] = set()
+            for r in orphaned:
+                handles = json.loads(r["requested_handles_json"])
+                unresolved_handles.update(h for h in handles if h not in processed)
+            if unresolved_handles:
+                logger.warning(
+                    f"[SESSION] {len(orphaned)} Instagram batch request row(s) have "
+                    f"{len(unresolved_handles)} unresolved handle(s) -- "
+                    f"re-run with --igDatasetID if a real Apify run exists for them."
+                )
         rows = self._conn.execute("SELECT * FROM places").fetchall()
         records: dict[str, dict[str, Any]] = {}
         for row in rows:

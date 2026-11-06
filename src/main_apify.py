@@ -37,6 +37,7 @@ from playwright_engine import (
     ig_profile_regex,
     _is_skippable_website,
 )
+import playwright_engine
 import health_monitor
 import pipeline_session
 
@@ -169,7 +170,11 @@ def _parse_instagram_timestamp(raw_timestamp: Any) -> Optional[datetime]:
             pass  # not ISO-shaped -- fall through, might be a numeric-string epoch
     if isinstance(raw_timestamp, (int, float, str)):
         try:
-            return datetime.fromtimestamp(float(raw_timestamp), tz=timezone.utc)
+            dt = datetime.fromtimestamp(float(raw_timestamp), tz=timezone.utc)
+            # FX-12: guard against numeric date strings (e.g. "20240101") being wrongly
+            # parsed as epoch seconds, which lands in 1970. Instagram was founded in 2010.
+            if dt.year >= 2010:
+                return dt
         except (TypeError, ValueError, OSError, OverflowError):
             pass
     logging.warning(f"[IG INVALID TIMESTAMP] Ignoring malformed timestamp: {raw_timestamp!r}")
@@ -208,6 +213,24 @@ class CircuitBreakerTriggered(RuntimeError):
 _ACTIVE_SESSION: Optional[pipeline_session.PipelineSession] = None
 _ACTIVE_LOG_ID: Optional[int] = None
 _ACTIVE_LOG_HANDLER: Optional[logging.Handler] = None
+_ACTIVE_HEARTBEAT: Optional[playwright_engine.DiagnosticHeartbeat] = None
+
+
+def _disable_windows_quick_edit() -> None:
+    """FX-13 / Windows: prevent accidental mouse clicks in the console from
+    pausing process stdout and blocking workers."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            h_stdin = kernel32.GetStdHandle(-10)  # STD_INPUT_HANDLE
+            mode = ctypes.c_ulong()
+            if kernel32.GetConsoleMode(h_stdin, ctypes.byref(mode)):
+                # ENABLE_QUICK_EDIT_MODE = 0x0040, ENABLE_EXTENDED_FLAGS = 0x0080
+                new_mode = (mode.value & ~0x0040) | 0x0080
+                kernel32.SetConsoleMode(h_stdin, new_mode)
+        except Exception:
+            pass
 
 
 def _parse_args() -> argparse.Namespace:
@@ -241,7 +264,13 @@ def _check_health(health: health_monitor.PipelineHealthMonitor, stage: str) -> N
 
 def _finish_active_execution(reason: str) -> None:
     """Best-effort crash/circuit-breaker bookkeeping for the active session."""
-    global _ACTIVE_SESSION, _ACTIVE_LOG_ID, _ACTIVE_LOG_HANDLER
+    global _ACTIVE_SESSION, _ACTIVE_LOG_ID, _ACTIVE_LOG_HANDLER, _ACTIVE_HEARTBEAT
+    if _ACTIVE_HEARTBEAT is not None:
+        try:
+            _ACTIVE_HEARTBEAT.stop()
+        except Exception:
+            pass
+        _ACTIVE_HEARTBEAT = None
     if _ACTIVE_SESSION is not None and _ACTIVE_LOG_ID is not None:
         try:
             _ACTIVE_SESSION.end_execution_log(_ACTIVE_LOG_ID, reason)
@@ -263,7 +292,8 @@ def _finish_active_execution(reason: str) -> None:
 # MAIN EXECUTION
 # =====================================================================
 def main() -> None:
-    global _ACTIVE_SESSION, _ACTIVE_LOG_ID, _ACTIVE_LOG_HANDLER
+    global _ACTIVE_SESSION, _ACTIVE_LOG_ID, _ACTIVE_LOG_HANDLER, _ACTIVE_HEARTBEAT
+    _disable_windows_quick_edit()
     args = _parse_args()
     flush_dns_cache()
     client: Any = ApifyClient(APIFY_API_TOKEN)
@@ -274,6 +304,12 @@ def main() -> None:
     )
     _ACTIVE_SESSION = session
     log_filename = _configure_execution_log(session.session_id)
+    # FX-13: start 5s file-only diagnostic heartbeat
+    heartbeat = playwright_engine.DiagnosticHeartbeat(interval=5.0)
+    heartbeat.attach_file_handler(log_filename)
+    heartbeat.start()
+    _ACTIVE_HEARTBEAT = heartbeat
+
     _ACTIVE_LOG_ID = session.start_execution_log(
         mode="resume" if args.resume else "fresh", log_filename=log_filename,
     )
@@ -609,6 +645,14 @@ def main() -> None:
         )
         if sites_attempted:
             logging.info(f"   Avg engine time/crawled site: {step2_elapsed / sites_attempted:.1f}s")
+
+    # FX-2b: check if any places were left un-crawled due to missing browser
+    still_pending_step2 = set(session.get_pending_place_ids(step=2))
+    if still_pending_step2:
+        logging.warning(
+            f"[SESSION] {len(still_pending_step2)} place(s) were never crawled (no browser). "
+            f"This session will NOT be archived so --resume can retry them."
+        )
 
     # A4a: the CSV and later stages must see both this invocation's records
     # and every checkpoint rehydrated from an interrupted prior invocation.
@@ -1019,6 +1063,13 @@ def main() -> None:
     # A4a: rehydrate once more after Step 4 so the CSV is derived solely
     # from durable state, including records completed by an earlier resume.
     local_records = session.rehydrate_local_records()
+
+    # FX-2c: ensure places that were never crawled due to missing browser
+    # are clearly labeled in the CSV rather than appearing as blank/unattempted.
+    for pid in still_pending_step2:
+        if pid in local_records:
+            local_records[pid]["Playwright Status"] = "Pending - Not Crawled (No Browser Available)"
+
     sorted_records = sorted(local_records.values(), key=_tier_sort_key)
     
     csv_file = f"{config.OUTPUT_BASE_NAME}{OUTPUT_EXT}"
@@ -1054,10 +1105,31 @@ def main() -> None:
                 data.get("Fallback Status", ""),
             ])
 
-    session.end_execution_log(_ACTIVE_LOG_ID, reason="complete")
-    _ACTIVE_LOG_ID = None
-    session.finalize(output_csv_filename=csv_file)
-    _ACTIVE_SESSION = None
+    # FX-2b: only finalize and archive if all Step 2 places were processed.
+    # Otherwise keep the session active so --resume can retry them.
+    if still_pending_step2:
+        session.end_execution_log(_ACTIVE_LOG_ID, reason="partial_no_browser")
+        _ACTIVE_LOG_ID = None
+        session.close()
+        _ACTIVE_SESSION = None
+        logging.warning(
+            f"\n⚠️ [SESSION NOT ARCHIVED] {len(still_pending_step2)} place(s) were never crawled (no browser). "
+            f"Session file remains active at: {session.db_path}\n"
+            f"   Resume when a browser is available using:\n"
+            f"   python main_apify.py --resume {session.db_path}"
+        )
+    else:
+        session.end_execution_log(_ACTIVE_LOG_ID, reason="complete")
+        _ACTIVE_LOG_ID = None
+        session.finalize(output_csv_filename=csv_file)
+        _ACTIVE_SESSION = None
+
+    if _ACTIVE_HEARTBEAT is not None:
+        _ACTIVE_HEARTBEAT.stop()
+        _ACTIVE_HEARTBEAT = None
+
+    health.close()
+
     if _ACTIVE_LOG_HANDLER is not None:
         logging.getLogger().removeHandler(_ACTIVE_LOG_HANDLER)
         _ACTIVE_LOG_HANDLER.close()

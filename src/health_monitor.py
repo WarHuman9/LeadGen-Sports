@@ -134,7 +134,9 @@ dependency on pywin32 at all.
 
 from __future__ import annotations
 
+import collections
 import logging
+import threading
 import time
 from typing import Any, Optional, Protocol, cast
 
@@ -466,16 +468,13 @@ class CPUDetector:
         self.sustained_seconds = sustained_seconds
         self.min_fraction_above = min_fraction_above
         self.enabled = enabled
-        # Frequency-based streak tracking: _streak_start marks when the
-        # current sustained window began, and _streak_samples collects
-        # ALL samples (including below-threshold dips) within that window.
-        # Unlike the earlier strict-streak approach that reset on any
-        # single below-threshold sample, this version tracks what FRACTION
-        # of samples cleared the threshold (via min_fraction_above) and
-        # only resets when too few samples qualify -- tolerating occasional
-        # momentary dips within an otherwise sustained high-CPU episode.
-        self._streak_start: Optional[float] = None
-        self._streak_samples: list[float] = []
+        # FX-10 / D-6: Guard against cadence mismatch where 2 coarse per-record
+        # samples falsely trip an 8s sustained check. Require at least min_samples.
+        self.min_samples = max(int(sustained_seconds * 0.6), 3)
+        self._samples: collections.deque[tuple[float, float]] = collections.deque()
+        self._stop_event = threading.Event()
+        self._sampler_thread: Optional[threading.Thread] = None
+
         if enabled and psutil is None:
             logger.warning(
                 "[HEALTH] CPUDetector was requested enabled, but psutil isn't "
@@ -484,32 +483,60 @@ class CPUDetector:
             )
             self.enabled = False
         elif enabled and psutil is not None:
-            # Prime psutil's internal baseline -- the first
-            # cpu_percent(interval=None) call always returns a meaningless
-            # 0.0 with nothing yet to compare against.
+            # Prime psutil baseline
             psutil.cpu_percent(interval=None)
+            self.start_sampler()
+
+    def start_sampler(self) -> None:
+        if self._sampler_thread is not None and self._sampler_thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._sampler_thread = threading.Thread(target=self._sample_loop, daemon=True, name="cpu_sampler")
+        self._sampler_thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._sampler_thread is not None:
+            self._sampler_thread.join(timeout=1.5)
+            self._sampler_thread = None
+
+    def _sample_loop(self) -> None:
+        while not self._stop_event.wait(1.0):
+            try:
+                if psutil is not None:
+                    val = psutil.cpu_percent(interval=None)
+                    self.record_sample(val)
+            except Exception:
+                pass
+
+    def record_sample(self, val: float, timestamp: Optional[float] = None) -> None:
+        """Record a single sample. Called by background thread or directly by tests."""
+        now = time.monotonic() if timestamp is None else timestamp
+        self._samples.append((now, val))
+        cutoff = now - (self.sustained_seconds * 2.0)
+        while self._samples and self._samples[0][0] < cutoff:
+            self._samples.popleft()
 
     def check(self) -> Optional[str]:
         if not self.enabled or psutil is None:
             return None
-        value = psutil.cpu_percent(interval=None)
+
         now = time.monotonic()
+        cutoff = now - self.sustained_seconds
 
-        if self._streak_start is None:
-            self._streak_start = now
-            self._streak_samples = []
-        self._streak_samples.append(value)
+        # If background sampler hasn't run yet, take one sample inline:
+        if not self._samples:
+            val = psutil.cpu_percent(interval=None)
+            self.record_sample(val, now)
 
-        duration = now - self._streak_start
-        frac_above = sum(1 for v in self._streak_samples if v >= self.threshold_percent) / len(self._streak_samples)
-
-        if frac_above < self.min_fraction_above:
-            self._streak_start = None
-            self._streak_samples = []
+        window_samples = [val for ts, val in self._samples if ts >= cutoff]
+        if len(window_samples) < self.min_samples:
             return None
 
-        if duration >= self.sustained_seconds:
-            avg = sum(self._streak_samples) / len(self._streak_samples)
+        frac_above = sum(1 for v in window_samples if v >= self.threshold_percent) / len(window_samples)
+        if frac_above >= self.min_fraction_above:
+            avg = sum(window_samples) / len(window_samples)
+            duration = now - min(ts for ts, val in self._samples if ts >= cutoff)
             return (
                 f"CPU sustained >= {self.threshold_percent:.1f}% for {duration:.1f}s "
                 f"({frac_above*100:.0f}% of samples qualifying, avg {avg:.1f}%)"
@@ -574,6 +601,15 @@ class PipelineHealthMonitor:
         new class implementing HealthDetector, register it here, done.
         check_health()'s own trigger logic never has to change."""
         self.detectors.append(detector)
+
+    def close(self) -> None:
+        """Clean up background threads (e.g. CPUDetector sampler)."""
+        for d in self.detectors:
+            if hasattr(d, "stop"):
+                try:
+                    d.stop()
+                except Exception:
+                    pass
 
 
 # =====================================================================

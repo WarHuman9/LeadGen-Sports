@@ -118,6 +118,7 @@ import logging
 import os
 import random
 import re
+import threading
 import time
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
@@ -167,7 +168,7 @@ FB_SKIP_PATH_PREFIXES = ["/tr", "/sharer", "/share", "/plugins", "/policy", "/po
                           "/login", "/dialog", "/legal", "/help"]
 FB_SKIP_SUBSTRINGS    = ["/wix", "/squarespace"]
 
-IG_SKIP_PATH_PREFIXES = ["/p/", "/reel", "/tv/", "/stories/"]
+IG_SKIP_PATH_PREFIXES = ["/p/", "/reel", "/reels", "/tv/", "/stories/"]
 IG_SKIP_SUBSTRINGS    = ["/embed", "/squarespace", "/wix"]
 
 
@@ -190,14 +191,14 @@ def _should_skip_social_href(href: str, path_prefixes: list[str], substrings: li
     return False
 
 
-IG_SKIP_USERNAMES = ["accounts", "explore", "developer", "about", "legal", "wix", "squarespace", "blog", "linktree", "stories", "reel", "tv", "help", "press", "privacy", "terms"]
+IG_SKIP_USERNAMES = ["accounts", "explore", "developer", "about", "legal", "wix", "squarespace", "blog", "linktree", "stories", "reel", "reels", "tv", "help", "press", "privacy", "terms"]
 
 # Pre-filtering rules — junk/institutional domains skipped before the
 # browser ever opens.  Moved here from main_apify.py so the main
 # script stays a pure integration layer (implementation_plan_5 alignment).
 # Dot-prefixed entries are TLD-anchored; non-dot entries are substring
 # checks against the domain only (not the full URL).
-SKIP_WEBSITE_KEYWORDS = [".gov", ".top", ".xyz", ".wtf", "ymca", "gotimmy", ".lol"]
+SKIP_WEBSITE_KEYWORDS = [".gov", ".nhs", ".top", ".xyz", ".wtf", "ymca", "gotimmy", ".lol"]
 
 
 def _is_skippable_website(raw_website: str, skip_keywords: Optional[list[str]] = None) -> bool:
@@ -214,7 +215,10 @@ def _is_skippable_website(raw_website: str, skip_keywords: Optional[list[str]] =
 
     for kw in skip_keywords:
         if kw.startswith("."):
-            if domain.endswith(kw):
+            # FX-5: dot-delimited label match -- `.gov` hits both `x.gov`
+            # and `x.gov.uk`, while `topshottennis.net` stays safe because
+            # `.top` is not followed by a dot inside the domain.
+            if domain.endswith(kw) or (kw + ".") in domain:
                 return True
         else:
             if kw in domain:
@@ -331,7 +335,16 @@ MAX_SECTION_TEXT_CANDIDATES = 5
 
 # ---- Watchdog ----
 HOMEPAGE_WATCHDOG_SECONDS = 60   # covers goto() + social-link poll + adaptive wait + jitter scroll + scoped scan
-FALLBACK_WATCHDOG_SECONDS = 25   # applied individually per sitemap/section/guessed-path visit
+FALLBACK_WATCHDOG_SECONDS = 35   # applied individually per sitemap/section/guessed-path visit (FX-1: raised from 25)
+
+# FX-1: visit-profile budgets.  Fallback pages (sitemap slots, section-text
+# candidates) rarely have late-appearing social links, so they get a tighter
+# F4 poll and F5 adaptive-wait cap than the homepage.  Numbers measured from
+# the Nov 2026 run (see improvement_plan_1_fixes.md Part F).
+VISIT_PROFILES: dict[str, dict[str, float]] = {
+    "homepage": {"poll": 12.0, "adaptive_cap": 7.0},
+    "fallback": {"poll":  4.0, "adaptive_cap": 2.0},
+}
 
 
 # =====================================================================
@@ -752,11 +765,21 @@ def _adaptive_content_wait(page: Any, max_extension_seconds: float = 7.0) -> flo
     return time.monotonic() - start
 
 
-def playwright_visit_and_scan(context: Any, url: str) -> dict[str, Any]:
+def playwright_visit_and_scan(context: Any, url: str, profile: str = "homepage") -> dict[str, Any]:
     """Runs entirely inside the PlaywrightWorker's dedicated thread. Opens
     a page, navigates, runs the logged jitter scroll, then the scoped
     multi-selector scan. Returns a plain dict so it crosses the
-    future.result() boundary safely."""
+    future.result() boundary safely.
+
+    FX-1: accepts a `profile` parameter ('homepage' or 'fallback') that
+    controls F4 poll and F5 adaptive-wait budgets.  Fallback visits get
+    tighter budgets because social links on subpages (/contact, /about)
+    are almost always present at domcontentloaded.
+    FX-9: _adaptive_content_wait is only called when F4 returned False.
+    FX-1: wait_for_selector and networkidle removed -- F4 already polled
+    for link existence, and SCOPED_SCAN_JS reads DOM presence, not CSS
+    visibility."""
+    budget = VISIT_PROFILES[profile]
     page = None
     try:
         page = context.new_page()
@@ -767,36 +790,60 @@ def playwright_visit_and_scan(context: Any, url: str) -> dict[str, Any]:
         # call sites. Fixes real production logs where multiple
         # jitter-scroll blocks ran back-to-back with no way to tell which
         # stage each one belonged to.
-        logger.info(f"    ↳ 🌐 [VISITING] {url}")
+        logger.info(f"    ↳ 🌐 [VISITING] {url} (profile={profile})")
+
+        t0 = time.monotonic()
         response = page.goto(url, timeout=15000, wait_until="domcontentloaded")
+        t_goto = time.monotonic() - t0
 
         if not response or response.status != 200:
             status = response.status if response else "No Response"
             return {"ok": False, "http_status": status, "error": None}
 
-        _wait_for_social_links_or_settle(page)
-        extra = _adaptive_content_wait(page)
-        if extra > 1.0:
-            logger.info(f"    ↳ ⏳ [ADAPTIVE WAIT] Extended {extra:.1f}s -- anchor count still growing")
+        t1 = time.monotonic()
+        found = _wait_for_social_links_or_settle(page, max_wait_seconds=budget["poll"])
+        t_poll = time.monotonic() - t1
 
+        # FX-9: only call F5 when F4 returned False -- the plan's own
+        # description ("follow-on to F4's give-up") means F5 is pointless
+        # if F4 already found links.  Saves >= 1s per page where F4 hits.
+        t_adapt = 0.0
+        if not found:
+            t2 = time.monotonic()
+            extra = _adaptive_content_wait(page, max_extension_seconds=budget["adaptive_cap"])
+            t_adapt = time.monotonic() - t2
+            if extra > 1.0:
+                logger.info(f"    ↳ ⏳ [ADAPTIVE WAIT] Extended {extra:.1f}s -- anchor count still growing")
+
+        t3 = time.monotonic()
         run_jittery_scroll(page)
+        t_scroll = time.monotonic() - t3
 
-        try:
-            page.wait_for_selector(
-                "a[href*='instagram.com'], a[href*='facebook.com']", timeout=5000,
-            )
-        except PlaywrightTimeoutError:
-            try:
-                page.wait_for_load_state("networkidle", timeout=3000)
-            except PlaywrightTimeoutError:
-                pass
+        # FX-1: wait_for_selector and its networkidle fallback removed.
+        # F4 already polled for link DOM existence, and SCOPED_SCAN_JS
+        # reads `a.href` without needing CSS visibility.  The old 5s
+        # wait_for_selector was wasted work on every visit -- in the Aug
+        # log 16 of 44 hit visits waited the full 5s although the link
+        # was already in the DOM.
 
+        t4 = time.monotonic()
         anchors = page.evaluate(SCOPED_SCAN_JS, SCOPED_SELECTORS)
         base_domain = urlparse(url).netloc.lower().replace("www.", "")
         signals = extract_signals_from_scoped_anchors(anchors, base_domain)
+        t_scan = time.monotonic() - t4
+
         signals["ok"] = True
         signals["http_status"] = response.status
         signals["error"] = None
+
+        # FX-1: per-phase timing log -- one line per visit, so the next
+        # run's performance can be checked directly from the log rather
+        # than inferred from timestamps.
+        logger.info(
+            f"    ↳ ⏱ [PHASES] profile={profile} goto={t_goto:.1f}s "
+            f"poll={t_poll:.1f}s adaptive={t_adapt:.1f}s "
+            f"scroll={t_scroll:.1f}s scan={t_scan:.1f}s"
+        )
         return signals
 
     except Exception as e:
@@ -945,6 +992,66 @@ def discover_sitemap_urlsets(website: str, user_agent: Optional[str] = None) -> 
             continue
 
     return {"sitemap_status": "Not Found", "matched_urlsets": [], "total_locs_found": 0}
+
+
+# =====================================================================
+# FX-13 diagnostic: file-only heartbeat to distinguish code stalls from
+# machine/process freezes.  The heartbeat thread writes to a dedicated
+# logger that does NOT propagate to the root logger's console handler,
+# so it cannot be blocked by Windows QuickEdit mode or console I/O.
+# The caller is responsible for attaching a FileHandler to
+# "playwright_engine.heartbeat" before calling start() -- if no handler
+# is attached, the heartbeat messages are silently discarded (no crash).
+# =====================================================================
+class DiagnosticHeartbeat:
+    """Start/stop a 5-second background heartbeat to a file-only logger.
+    Used to diagnose FX-13's unexplained 40-60s silent stalls: if the
+    heartbeat keeps ticking through a stall, the process was alive and
+    blocked on something specific (likely console I/O); if it stops,
+    the whole process or machine froze."""
+
+    def __init__(self, interval: float = 5.0) -> None:
+        self._interval = interval
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        # Dedicated logger that does NOT propagate to root -- console
+        # handlers on root can block on Windows QuickEdit, which is
+        # exactly what we're trying to detect.
+        self._logger = logging.getLogger("playwright_engine.heartbeat")
+        self._logger.propagate = False
+
+    def attach_file_handler(self, log_filepath: str) -> None:
+        """Attach a FileHandler so heartbeat lines reach the log file.
+        Safe to call multiple times (idempotent: skips if a handler for
+        the same file is already attached)."""
+        for h in self._logger.handlers:
+            if isinstance(h, logging.FileHandler) and h.baseFilename == os.path.abspath(log_filepath):
+                return
+        fh = logging.FileHandler(log_filepath, mode="a", encoding="utf-8")
+        fh.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+        self._logger.addHandler(fh)
+        self._logger.setLevel(logging.DEBUG)
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True, name="heartbeat")
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=self._interval + 2)
+            self._thread = None
+
+    def _run(self) -> None:
+        seq = 0
+        while not self._stop_event.wait(self._interval):
+            seq += 1
+            self._logger.debug(
+                f"♥ heartbeat seq={seq} monotonic={time.monotonic():.1f}"
+            )
 
 
 # =====================================================================
@@ -1105,16 +1212,38 @@ def resolve_social_links(worker: "PlaywrightWorker", website: str) -> dict[str, 
     region_hit = homepage_result.get("scoped_region_hit")
     section_candidates = homepage_result.get("section_candidates") or []
 
-    if ig_url or fb_url:
-        logger.info(f"    ↳ ✅ [DIRECT HIT] region={region_hit} ig={bool(ig_url)} fb={bool(fb_url)}")
-        return {
-            "instagram_url": ig_url, "instagram_handle": ig_handle, "facebook_url": fb_url,
-            "playwright_status": playwright_status,
-            "fallback_status": f"Direct Homepage Match (region: {region_hit})",
-            "watchdog_timed_out": False,
-        }
+    # FX-6: a catch-all-only hit (region == "a[href]") may be a third-party
+    # social link in the page body (sponsor, partner, "as seen on").  Save
+    # it as a tentative candidate and continue the fallback chain to see if
+    # a nav-region hit exists on a subpage.  If nothing better is found in
+    # Stages 2-3, the tentative is accepted with a distinct label.
+    tentative_catch_all: Optional[dict[str, Any]] = None
 
-    fallback_log.append("Homepage: no direct social links in scoped regions")
+    if ig_url or fb_url:
+        if region_hit in NAVIGATIONAL_REGIONS:
+            logger.info(f"    ↳ ✅ [DIRECT HIT] region={region_hit} ig={bool(ig_url)} fb={bool(fb_url)}")
+            return {
+                "instagram_url": ig_url, "instagram_handle": ig_handle, "facebook_url": fb_url,
+                "playwright_status": playwright_status,
+                "fallback_status": f"Direct Homepage Match (region: {region_hit})",
+                "watchdog_timed_out": False,
+            }
+        else:
+            # Catch-all body hit -- save and continue the fallback chain
+            logger.info(
+                f"    ↳ ⚠️ [CATCH-ALL HIT] region={region_hit} ig={bool(ig_url)} "
+                f"fb={bool(fb_url)} -- continuing fallback chain for nav-region confirmation"
+            )
+            tentative_catch_all = {
+                "instagram_url": ig_url, "instagram_handle": ig_handle, "facebook_url": fb_url,
+                "playwright_status": playwright_status,
+                "fallback_status": "",  # filled in at acceptance time
+                "watchdog_timed_out": False,
+            }
+            fallback_log.append(f"Homepage: catch-all hit (region: {region_hit}) -- saved as tentative, continuing for nav-region confirmation")
+
+    if not tentative_catch_all:
+        fallback_log.append("Homepage: no direct social links in scoped regions")
 
     # ---- Stage 2: Sitemap discovery. Stops at first hit. ----
     # Two independent gates decide whether matched urlset slots get tested
@@ -1159,7 +1288,7 @@ def resolve_social_links(worker: "PlaywrightWorker", website: str) -> dict[str, 
                 visited_urls.add(normalized)
 
                 visit_result, slot_timed_out = worker.run(
-                    lambda ctx, u=slot_url: playwright_visit_and_scan(ctx, u), timeout=FALLBACK_WATCHDOG_SECONDS
+                    lambda ctx, u=slot_url: playwright_visit_and_scan(ctx, u, profile="fallback"), timeout=FALLBACK_WATCHDOG_SECONDS
                 )
                 if slot_timed_out:
                     logger.warning(f"    ↳ ⏱️💀 [WATCHDOG] urlset[{slot_idx}] ({slot_url}) exceeded {FALLBACK_WATCHDOG_SECONDS}s -- worker discarded")
@@ -1204,7 +1333,7 @@ def resolve_social_links(worker: "PlaywrightWorker", website: str) -> dict[str, 
             visited_urls.add(normalized)
 
             visit_result, cand_timed_out = worker.run(
-                lambda ctx, u=cand_url: playwright_visit_and_scan(ctx, u), timeout=FALLBACK_WATCHDOG_SECONDS
+                lambda ctx, u=cand_url: playwright_visit_and_scan(ctx, u, profile="fallback"), timeout=FALLBACK_WATCHDOG_SECONDS
             )
             if cand_timed_out:
                 logger.warning(f"    ↳ ⏱️💀 [WATCHDOG] Section-text visit ({cand_url}) exceeded {FALLBACK_WATCHDOG_SECONDS}s -- worker discarded")
@@ -1235,6 +1364,19 @@ def resolve_social_links(worker: "PlaywrightWorker", website: str) -> dict[str, 
 
     # Section-text was the true last resort -- guessed-path is retired
     # entirely (see module docstring). Nothing left to try.
+
+    # FX-6: if a catch-all-only homepage hit was saved as tentative and no
+    # nav-region hit was found in Stages 2-3, accept the tentative with
+    # a distinct low-confidence label so it can be filtered post-run.
+    if tentative_catch_all is not None:
+        fallback_log.append("Accepted homepage catch-all (no nav-region confirmation found in fallback chain)")
+        tentative_catch_all["fallback_status"] = " | ".join(fallback_log)
+        logger.info(
+            f"    ↳ ⚠️ [CATCH-ALL ACCEPTED] No nav-region hit in fallback chain -- "
+            f"accepting homepage catch-all as low-confidence match"
+        )
+        return tentative_catch_all
+
     fallback_log.append("No links found anywhere")
     return {
         "instagram_url": None, "instagram_handle": None, "facebook_url": None,

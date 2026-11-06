@@ -449,6 +449,15 @@ OUTPUT_BASE_NAME: str = "london_sports_academies"
 # touches Playwright, the Apify client, or any pipeline behavior; they
 # only check this file's own values against each other.
 # =====================================================================
+def _validate_run_timeouts(timeouts: dict[str, Any]) -> None:
+    """FX-11.2: Validate actor run timeouts to fail fast on invalid values."""
+    for name, val in timeouts.items():
+        if isinstance(val, bool) or not isinstance(val, (int, float)) or val <= 0:
+            raise ConfigError(
+                f"❌ config.py: {name} must be a positive number of minutes, got {val!r}."
+            )
+
+
 def _validate_health_monitor_config(settings: HealthMonitorKwargs) -> None:
     """Keep health-monitor constructor arguments well-formed before a run
     starts. The values are deliberately supplied as a single kwargs-shaped
@@ -622,6 +631,11 @@ _validate_custom_geolocation(TARGET_MULTIPOLYGON, label="TARGET_MULTIPOLYGON")
 _validate_target_multipolygon_labels(TARGET_MULTIPOLYGON, TARGET_MULTIPOLYGON_LABELS)
 
 _validate_health_monitor_config(HEALTH_MONITOR_KWARGS)
+_validate_run_timeouts({
+    "MAPS_RUN_TIMEOUT_MINUTES": MAPS_RUN_TIMEOUT_MINUTES,
+    "INSTAGRAM_RUN_TIMEOUT_MINUTES": INSTAGRAM_RUN_TIMEOUT_MINUTES,
+    "ADS_RUN_TIMEOUT_MINUTES": ADS_RUN_TIMEOUT_MINUTES,
+})
 
 _validate_location_config(LOCATION_QUERY, CUSTOM_GEOLOCATION)
 if CUSTOM_GEOLOCATION is not None:
