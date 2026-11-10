@@ -110,6 +110,7 @@ APIFY_API_TOKEN = _require_env("APIFY_API_TOKEN")
 
 OUTPUT_EXT = ".csv"   # stays here -- see comment above.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+OUTPUT_DIR = PROJECT_ROOT / "Output"
 
 # Pre-filtering rules (SKIP_WEBSITE_KEYWORDS and _is_skippable_website)
 # moved to playwright_engine.py so the engine owns URL validation
@@ -1157,10 +1158,11 @@ def main() -> None:
 
     sorted_records = sorted(local_records.values(), key=_tier_sort_key)
     
-    csv_file = PROJECT_ROOT / f"{config.OUTPUT_BASE_NAME}{OUTPUT_EXT}"
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    csv_file = OUTPUT_DIR / f"{config.OUTPUT_BASE_NAME}{OUTPUT_EXT}"
     counter  = 1
     while os.path.exists(csv_file):
-        csv_file = PROJECT_ROOT / f"{config.OUTPUT_BASE_NAME}({counter}){OUTPUT_EXT}"
+        csv_file = OUTPUT_DIR / f"{config.OUTPUT_BASE_NAME}({counter}){OUTPUT_EXT}"
         counter += 1
     
     with open(csv_file, mode="w", newline="", encoding="utf-8") as f:
