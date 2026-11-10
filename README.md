@@ -77,7 +77,7 @@ src
    ├── health_monitor.py          # circuit breaker and detectors
    ├── pipeline_session.py        # crash-safe session handling and resume logic
    ├── playwright_engine.py       # browser automation for social-link discovery
-   ├── .env                       # local-only secrets, such as APIFY_API_TOKEN
+├── .env                       # local-only secrets, such as APIFY_API_TOKEN
 ├── logs/                      # execution logs
 ├── sessions/                  # persistent session database state
 ├── test/                      # project validation/test scripts
@@ -150,11 +150,11 @@ python main_apify.py --resume sessions\active\your_session.db
 The script supports recovery flags for incomplete Apify dataset state:
 
 ```bash
-python main_apify.py \
-  --resume sessions\active\your_session.db \
-  --MapDatasetID <maps_dataset_id> \
+python main_apify.py --resume sessions\active\your_session.db 
+  --MapDatasetID <maps_dataset_id> or
   --igDatasetID <instagram_dataset_id>
 ```
+* (**Note:** Both Map & IG argument can be used at the same time )
 
 ## Operational features
 
