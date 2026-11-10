@@ -79,8 +79,10 @@ src
    ├── playwright_engine.py       # browser automation for social-link discovery
 ├── .env                       # local-only secrets, such as APIFY_API_TOKEN
 ├── logs/                      # execution logs
+├── Output/                    # all CSV output from Pipeline is stored here
 ├── sessions/                  # persistent session database state
 ├── test/                      # project validation/test scripts
+├── X_Other                    # Others, e.g., Map's enum for category keywords
 ├── README.md                  # this file
 └── ...
 ```
@@ -194,7 +196,7 @@ It is specifically tuned to find Instagram and Facebook links rather than to per
 
 ## Output
 
-The pipeline writes structured CSV results representing lead records after filtering and enrichment. The exact output file naming is controlled in the orchestration layer, and logs are kept under the `logs/` folder for each run.
+The pipeline writes structured CSV results representing lead records after filtering and enrichment to the project-root `Output/` folder, creating the folder if needed. If a file with the same name already exists, the pipeline increments the filename rather than overwriting it. Logs are kept under `logs/` for each run.
 
 ## Notes for contributors
 
