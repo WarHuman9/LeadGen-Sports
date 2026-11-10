@@ -197,9 +197,13 @@ logger = logging.getLogger(__name__)
 # =====================================================================
 # A2: session file location
 # =====================================================================
-SESSIONS_ROOT = Path("sessions")
+SESSIONS_ROOT = Path(__file__).resolve().parent.parent / "sessions"
 SESSIONS_ACTIVE_DIR = SESSIONS_ROOT / "active"
 SESSIONS_ARCHIVE_DIR = SESSIONS_ROOT / "archive"
+
+# FX-11.3: Instant retry limit when an Instagram batch actor run fails or
+# times out with zero returned items.
+MAX_IG_EMPTY_RETRIES = 2
 
 
 def _now() -> str:
@@ -520,6 +524,8 @@ class PipelineSession:
         self._is_resume = is_resume
         self._rescue_map_dataset_id = rescue_map_dataset_id
         self._rescue_ig_dataset_id = rescue_ig_dataset_id
+        self.last_instagram_batch_status: Optional[str] = None
+        self.last_instagram_batch_failed: bool = False
 
     # -----------------------------------------------------------------
     # Construction: fresh vs. resume (A2, A10)
@@ -1182,7 +1188,9 @@ class PipelineSession:
         )
         self._conn.commit()
 
-    def _complete_instagram_batch_row(self, row_id: int, dataset_id: str, client: Any) -> None:
+    def _complete_instagram_batch_row(
+        self, row_id: int, dataset_id: str, client: Any
+    ) -> list[dict[str, Any]]:
         items = list(client.dataset(dataset_id).iterate_items())
         self._conn.execute(
             "UPDATE instagram_batch SET dataset_id=?, raw_results_json=?, fetched_at=? "
@@ -1198,6 +1206,19 @@ class PipelineSession:
             f"[SESSION] Instagram batch row {row_id} complete -- dataset {dataset_id}, "
             f"{len(items)} of {requested_count} requested profile(s) returned."
         )
+        return items
+
+    def _mark_instagram_batch_row_empty(
+        self, row_id: int, dataset_id: Optional[str] = None
+    ) -> None:
+        """Finalize a failed/empty batch row with [] so future resumes won't
+        mistakenly re-attach to its run_id as still in-flight."""
+        self._conn.execute(
+            "UPDATE instagram_batch SET dataset_id=?, raw_results_json=?, fetched_at=? "
+            "WHERE id=?",
+            (dataset_id, "[]", _now(), row_id),
+        )
+        self._conn.commit()
 
     def _load_all_instagram_results(self) -> list[dict[str, Any]]:
         rows = self._conn.execute(
@@ -1215,9 +1236,14 @@ class PipelineSession:
         stream_logs: bool = False,
         run_timeout: Optional[timedelta] = None,
     ) -> list[dict[str, Any]]:
+        self.last_instagram_batch_status = None
+        self.last_instagram_batch_failed = False
+
         expected = self._expected_instagram_handles()
         if not expected:
             return []
+
+        aborted_empty_in_flight = False
 
         # Normal in-flight resume -- unambiguous, no flag needed.
         in_flight = self._get_in_flight_instagram_batch_row()
@@ -1233,6 +1259,7 @@ class PipelineSession:
                 run_timeout=run_timeout,
             )
             status = _run_status(finished)
+            self.last_instagram_batch_status = status
             if status and status not in ("SUCCEEDED", "FINISHED"):
                 logger.warning(
                     f"[SESSION] In-flight Instagram batch run finished with status '{status}' (not SUCCEEDED) -- "
@@ -1240,7 +1267,12 @@ class PipelineSession:
                 )
             dataset_id = _extract_dataset_id(finished)
             if dataset_id:
-                self._complete_instagram_batch_row(in_flight["id"], dataset_id, client)
+                in_flight_items = self._complete_instagram_batch_row(in_flight["id"], dataset_id, client)
+            else:
+                in_flight_items = []
+                self._mark_instagram_batch_row_empty(in_flight["id"], None)
+            if status == "ABORTED" and not in_flight_items:
+                aborted_empty_in_flight = True
 
         # A4c's narrower window -- see this module's docstring, decision 2.
         # Caught during self-review: multiple orphaned rows can in
@@ -1293,10 +1325,9 @@ class PipelineSession:
         # handles or the entire expected set.
         already_processed = self._processed_instagram_handles()
         missing = expected - already_processed
-        if missing:
+        if missing and not aborted_empty_in_flight:
             is_supplemental = 1 if already_processed else 0
             sorted_missing = sorted(missing)
-            row_id = self._insert_instagram_batch_request(sorted_missing, is_supplemental)
 
             run_input = dict(run_input_base)
             run_input["directUrls"] = [f"https://www.instagram.com/{h}/" for h in sorted_missing]
@@ -1321,30 +1352,68 @@ class PipelineSession:
             # session's lifetime.
             run_input["resultsLimit"] = len(sorted_missing)
 
-            finished = _start_and_track(
-                client, "apify/instagram-scraper", run_input,
-                existing_run_id=None,
-                persist_run_id=lambda rid, row_id=row_id: self._set_instagram_batch_run_id(row_id, rid),
-                stream_logs=stream_logs,
-                run_timeout=run_timeout,
-            )
-            status = _run_status(finished)
-            if status and status not in ("SUCCEEDED", "FINISHED"):
-                logger.warning(
-                    f"[SESSION] Instagram batch run finished with status '{status}' (not SUCCEEDED) -- "
-                    f"proceeding with whatever partial dataset is available."
+            # FX-11.3: Instant retry up to MAX_IG_EMPTY_RETRIES when an actor
+            # run fails or times out with 0 items (never auto-retry ABORTED).
+            for attempt in range(MAX_IG_EMPTY_RETRIES + 1):
+                row_id = self._insert_instagram_batch_request(sorted_missing, is_supplemental)
+                finished = _start_and_track(
+                    client, "apify/instagram-scraper", run_input,
+                    existing_run_id=None,
+                    persist_run_id=lambda rid, row_id=row_id: self._set_instagram_batch_run_id(row_id, rid),
+                    stream_logs=stream_logs,
+                    run_timeout=run_timeout,
                 )
-            dataset_id = _extract_dataset_id(finished)
-            if not dataset_id:
-                raise RuntimeError(
-                    f"[SESSION] Instagram batch run finished but no dataset ID could "
-                    f"be extracted: {finished!r}"
-                )
-            self._complete_instagram_batch_row(row_id, dataset_id, client)
+                status = _run_status(finished)
+                self.last_instagram_batch_status = status
+                if status and status not in ("SUCCEEDED", "FINISHED"):
+                    logger.warning(
+                        f"[SESSION] Instagram batch run finished with status '{status}' (not SUCCEEDED) -- "
+                        f"proceeding with whatever partial dataset is available."
+                    )
 
-            row = self._get_meta_row()
-            if not row["instagram_dataset_origin"]:
-                self._set_meta(instagram_dataset_origin="initial")
+                dataset_id = _extract_dataset_id(finished)
+                if dataset_id:
+                    items = self._complete_instagram_batch_row(row_id, dataset_id, client)
+                else:
+                    items = []
+                    self._mark_instagram_batch_row_empty(row_id, None)
+
+                row = self._get_meta_row()
+                if not row["instagram_dataset_origin"]:
+                    self._set_meta(instagram_dataset_origin="initial")
+
+                if items:
+                    self.last_instagram_batch_failed = False
+                    break
+
+                if status == "ABORTED":
+                    logger.warning(
+                        "[SESSION] Instagram batch run was ABORTED with 0 profiles -- "
+                        "skipping auto-retry so manual aborts are respected; leaving missing handles resumable."
+                    )
+                    self.last_instagram_batch_failed = False
+                    break
+
+                if status in ("FAILED", "TIMED-OUT") or not dataset_id:
+                    if attempt < MAX_IG_EMPTY_RETRIES:
+                        logger.warning(
+                            f"[SESSION] Instagram batch returned 0 profile(s) "
+                            f"(status={status!r}, dataset_id={dataset_id!r}) -- "
+                            f"retrying immediately (retry {attempt + 1}/{MAX_IG_EMPTY_RETRIES})."
+                        )
+                        continue
+                    logger.error(
+                        f"[SESSION] Instagram batch failed with 0 profile(s) after "
+                        f"{MAX_IG_EMPTY_RETRIES} retries (status={status!r}) -- "
+                        f"leaving IG handles resumable."
+                    )
+                    self.last_instagram_batch_failed = True
+                    break
+
+                # Status was SUCCEEDED / FINISHED with 0 items -- break so Step 3's
+                # >20% missing threshold handles resumability without spinning.
+                self.last_instagram_batch_failed = False
+                break
 
         return self._load_all_instagram_results()
 

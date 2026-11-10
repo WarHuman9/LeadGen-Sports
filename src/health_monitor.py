@@ -469,9 +469,11 @@ class CPUDetector:
         self.min_fraction_above = min_fraction_above
         self.enabled = enabled
         # FX-10 / D-6: Guard against cadence mismatch where 2 coarse per-record
-        # samples falsely trip an 8s sustained check. Require at least min_samples.
+        # samples falsely trip an 8s sustained check. Require at least min_samples
+        # AND require the window to span at least sustained_seconds.
         self.min_samples = max(int(sustained_seconds * 0.6), 3)
         self._samples: collections.deque[tuple[float, float]] = collections.deque()
+        self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._sampler_thread: Optional[threading.Thread] = None
 
@@ -512,31 +514,57 @@ class CPUDetector:
     def record_sample(self, val: float, timestamp: Optional[float] = None) -> None:
         """Record a single sample. Called by background thread or directly by tests."""
         now = time.monotonic() if timestamp is None else timestamp
-        self._samples.append((now, val))
-        cutoff = now - (self.sustained_seconds * 2.0)
-        while self._samples and self._samples[0][0] < cutoff:
-            self._samples.popleft()
+        with self._lock:
+            self._samples.append((now, val))
+            cutoff = now - (self.sustained_seconds * 2.0)
+            while self._samples and self._samples[0][0] < cutoff:
+                self._samples.popleft()
 
     def check(self) -> Optional[str]:
         if not self.enabled or psutil is None:
             return None
 
         now = time.monotonic()
-        cutoff = now - self.sustained_seconds
 
-        # If background sampler hasn't run yet, take one sample inline:
-        if not self._samples:
-            val = psutil.cpu_percent(interval=None)
-            self.record_sample(val, now)
+        with self._lock:
+            if not self._samples:
+                # If background sampler hasn't run yet, take one sample inline.
+                val = psutil.cpu_percent(interval=None)
+                self._samples.append((now, val))
+            samples = sorted(self._samples, key=lambda item: item[0])
 
-        window_samples = [val for ts, val in self._samples if ts >= cutoff]
-        if len(window_samples) < self.min_samples:
+        latest_ts = samples[-1][0]
+        # Ignore stale sample history if the sampler hasn't ticked recently.
+        if (now - latest_ts) > 3.0:
             return None
 
-        frac_above = sum(1 for v in window_samples if v >= self.threshold_percent) / len(window_samples)
+        cutoff = latest_ts - self.sustained_seconds
+        window = [(ts, val) for ts, val in samples if ts >= cutoff]
+        older = [(ts, val) for ts, val in samples if ts < cutoff]
+
+        # Include one immediately-adjacent straddling sample (<= 2.0s before the
+        # first in-window sample) so 1s sampler timer jitter (e.g. 1.01s ticks)
+        # doesn't cause a genuine >= sustained_seconds episode to fall just
+        # under sustained_seconds when the boundary sits between two ticks.
+        if (
+            window
+            and (latest_ts - window[0][0]) < self.sustained_seconds
+            and older
+            and (window[0][0] - older[-1][0]) <= 2.0
+        ):
+            window.insert(0, older[-1])
+
+        if len(window) < self.min_samples:
+            return None
+
+        duration = latest_ts - window[0][0]
+        if duration < self.sustained_seconds:
+            return None
+
+        window_vals = [val for _, val in window]
+        frac_above = sum(1 for v in window_vals if v >= self.threshold_percent) / len(window_vals)
         if frac_above >= self.min_fraction_above:
-            avg = sum(window_samples) / len(window_samples)
-            duration = now - min(ts for ts, val in self._samples if ts >= cutoff)
+            avg = sum(window_vals) / len(window_vals)
             return (
                 f"CPU sustained >= {self.threshold_percent:.1f}% for {duration:.1f}s "
                 f"({frac_above*100:.0f}% of samples qualifying, avg {avg:.1f}%)"

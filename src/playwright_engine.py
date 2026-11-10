@@ -114,6 +114,8 @@ standalone test script) surfaced failure modes only real data could show:
 
 """
 
+import contextlib
+import inspect
 import logging
 import os
 import random
@@ -765,7 +767,25 @@ def _adaptive_content_wait(page: Any, max_extension_seconds: float = 7.0) -> flo
     return time.monotonic() - start
 
 
-def playwright_visit_and_scan(context: Any, url: str, profile: str = "homepage") -> dict[str, Any]:
+def _format_phase_summary(phases: dict[str, Any]) -> str:
+    """Format phase durations (seconds or '-' when unreached) for diagnostic logs."""
+    def _fmt(val: Any) -> str:
+        return f"{val:.1f}s" if isinstance(val, (int, float)) else "-"
+    return (
+        f"goto={_fmt(phases.get('goto'))} "
+        f"poll={_fmt(phases.get('poll'))} "
+        f"adaptive={_fmt(phases.get('adaptive'))} "
+        f"scroll={_fmt(phases.get('scroll'))} "
+        f"scan={_fmt(phases.get('scan'))}"
+    )
+
+
+def playwright_visit_and_scan(
+    context: Any,
+    url: str,
+    profile: str = "homepage",
+    phase_state: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
     """Runs entirely inside the PlaywrightWorker's dedicated thread. Opens
     a page, navigates, runs the logged jitter scroll, then the scoped
     multi-selector scan. Returns a plain dict so it crosses the
@@ -778,9 +798,47 @@ def playwright_visit_and_scan(context: Any, url: str, profile: str = "homepage")
     FX-9: _adaptive_content_wait is only called when F4 returned False.
     FX-1: wait_for_selector and networkidle removed -- F4 already polled
     for link existence, and SCOPED_SCAN_JS reads DOM presence, not CSS
-    visibility."""
+    visibility.
+    FX-1 / FX-13: records per-phase timings in a dict and logs [PHASES]
+    from finally so non-200, timeout, error, and unwound watchdog visits
+    also report where time went."""
     budget = VISIT_PROFILES[profile]
     page = None
+    phases: dict[str, Optional[float]] = {
+        "goto": None,
+        "poll": None,
+        "adaptive": None,
+        "scroll": None,
+        "scan": None,
+    }
+    if phase_state is not None:
+        phase_state.update(phases)
+        phase_state["active_phase"] = None
+        phase_state["phase_start"] = None
+
+    active_phase: Optional[str] = None
+    outcome = "error"
+
+    @contextlib.contextmanager
+    def _phase(name: str):
+        nonlocal active_phase
+        active_phase = name
+        start = time.monotonic()
+        if phase_state is not None:
+            phase_state["active_phase"] = name
+            phase_state["phase_start"] = start
+        try:
+            yield
+            if active_phase == name:
+                active_phase = None
+        finally:
+            elapsed = time.monotonic() - start
+            phases[name] = elapsed
+            if phase_state is not None:
+                phase_state[name] = elapsed
+                if phase_state.get("active_phase") == name:
+                    phase_state["active_phase"] = None
+
     try:
         page = context.new_page()
         page.route("**/*", structural_resource_router)
@@ -792,32 +850,32 @@ def playwright_visit_and_scan(context: Any, url: str, profile: str = "homepage")
         # stage each one belonged to.
         logger.info(f"    ↳ 🌐 [VISITING] {url} (profile={profile})")
 
-        t0 = time.monotonic()
-        response = page.goto(url, timeout=15000, wait_until="domcontentloaded")
-        t_goto = time.monotonic() - t0
+        with _phase("goto"):
+            response = page.goto(url, timeout=15000, wait_until="domcontentloaded")
 
         if not response or response.status != 200:
             status = response.status if response else "No Response"
+            outcome = f"http_{response.status}" if response else "no_response"
             return {"ok": False, "http_status": status, "error": None}
 
-        t1 = time.monotonic()
-        found = _wait_for_social_links_or_settle(page, max_wait_seconds=budget["poll"])
-        t_poll = time.monotonic() - t1
+        with _phase("poll"):
+            found = _wait_for_social_links_or_settle(page, max_wait_seconds=budget["poll"])
 
         # FX-9: only call F5 when F4 returned False -- the plan's own
         # description ("follow-on to F4's give-up") means F5 is pointless
         # if F4 already found links.  Saves >= 1s per page where F4 hits.
-        t_adapt = 0.0
         if not found:
-            t2 = time.monotonic()
-            extra = _adaptive_content_wait(page, max_extension_seconds=budget["adaptive_cap"])
-            t_adapt = time.monotonic() - t2
+            with _phase("adaptive"):
+                extra = _adaptive_content_wait(page, max_extension_seconds=budget["adaptive_cap"])
             if extra > 1.0:
                 logger.info(f"    ↳ ⏳ [ADAPTIVE WAIT] Extended {extra:.1f}s -- anchor count still growing")
+        else:
+            phases["adaptive"] = 0.0
+            if phase_state is not None:
+                phase_state["adaptive"] = 0.0
 
-        t3 = time.monotonic()
-        run_jittery_scroll(page)
-        t_scroll = time.monotonic() - t3
+        with _phase("scroll"):
+            run_jittery_scroll(page)
 
         # FX-1: wait_for_selector and its networkidle fallback removed.
         # F4 already polled for link DOM existence, and SCOPED_SCAN_JS
@@ -826,29 +884,30 @@ def playwright_visit_and_scan(context: Any, url: str, profile: str = "homepage")
         # log 16 of 44 hit visits waited the full 5s although the link
         # was already in the DOM.
 
-        t4 = time.monotonic()
-        anchors = page.evaluate(SCOPED_SCAN_JS, SCOPED_SELECTORS)
-        base_domain = urlparse(url).netloc.lower().replace("www.", "")
-        signals = extract_signals_from_scoped_anchors(anchors, base_domain)
-        t_scan = time.monotonic() - t4
+        with _phase("scan"):
+            anchors = page.evaluate(SCOPED_SCAN_JS, SCOPED_SELECTORS)
+            base_domain = urlparse(url).netloc.lower().replace("www.", "")
+            signals = extract_signals_from_scoped_anchors(anchors, base_domain)
 
         signals["ok"] = True
         signals["http_status"] = response.status
         signals["error"] = None
-
-        # FX-1: per-phase timing log -- one line per visit, so the next
-        # run's performance can be checked directly from the log rather
-        # than inferred from timestamps.
-        logger.info(
-            f"    ↳ ⏱ [PHASES] profile={profile} goto={t_goto:.1f}s "
-            f"poll={t_poll:.1f}s adaptive={t_adapt:.1f}s "
-            f"scroll={t_scroll:.1f}s scan={t_scan:.1f}s"
-        )
+        outcome = "ok"
         return signals
 
     except Exception as e:
+        outcome = f"error({active_phase or 'init'})"
         return {"ok": False, "http_status": None, "error": str(e)}
     finally:
+        # FX-1 / FX-13: log phase timings regardless of whether the visit
+        # succeeded, returned non-200, timed out, or threw.
+        try:
+            logger.info(
+                f"    ↳ ⏱ [PHASES] profile={profile} outcome={outcome} "
+                f"{_format_phase_summary(phases)}"
+            )
+        except Exception:
+            pass
         if page:
             try: page.close()
             except Exception: pass
@@ -1142,6 +1201,148 @@ class PlaywrightWorker:
         force_kill_new_children(self._baseline_pids)
 
 
+def _format_watchdog_phase_note(phase_state: dict[str, Any]) -> str:
+    """Format live phase progress when a watchdog timeout fires."""
+    if not phase_state:
+        return ""
+    active = phase_state.get("active_phase")
+    p_start = phase_state.get("phase_start")
+    active_note = ""
+    if active and isinstance(p_start, (int, float)):
+        active_note = f"stalled in '{active}' for {time.monotonic() - p_start:.1f}s | "
+    return f" [{active_note}{_format_phase_summary(phase_state)}]"
+
+
+def _build_catch_all_result(
+    tentative_catch_all: dict[str, Any],
+    playwright_status: str,
+    fallback_log: list[str],
+    watchdog_timed_out: bool,
+    reason_suffix: str,
+) -> dict[str, Any]:
+    """Finalize a saved low-confidence catch-all hit (on chain exhaustion or fallback watchdog)."""
+    source = tentative_catch_all["source"]
+    fallback_log.append(f"Accepted {source} catch-all ({reason_suffix})")
+    logger.info(
+        f"    ↳ ⚠️ [CATCH-ALL ACCEPTED] {reason_suffix} -- "
+        f"accepting {source} catch-all as low-confidence match"
+    )
+    return {
+        "instagram_url": tentative_catch_all["instagram_url"],
+        "instagram_handle": tentative_catch_all["instagram_handle"],
+        "facebook_url": tentative_catch_all["facebook_url"],
+        "playwright_status": playwright_status,
+        "fallback_status": " | ".join(fallback_log),
+        "watchdog_timed_out": watchdog_timed_out,
+    }
+
+
+def _run_fallback_candidates(
+    candidates: list[dict[str, str]],
+    visited_urls: set[str],
+    fallback_log: list[str],
+    playwright_status: str,
+    stage_source: str,
+    watchdog_status_suffix: str,
+    hit_log_prefix: str,
+    tentative_catch_all: Optional[dict[str, Any]],
+    visit_fn: Any,
+) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]], bool]:
+    """Visit fallback candidate pages in order, preferring NAVIGATIONAL_REGIONS hits.
+
+    Returns (final_result, tentative_catch_all, had_stage_catch_all).
+    final_result is non-None on a confirmed nav-region hit or watchdog timeout."""
+    had_stage_catch_all = False
+
+    for cand in candidates:
+        visit_url = cand["url"]
+        entry_label = cand["entry_label"]
+        normalized = _normalize_url_for_dedup(visit_url)
+        if normalized in visited_urls:
+            fallback_log.append(f"{entry_label} -> Skipped (already visited)")
+            continue
+        visited_urls.add(normalized)
+
+        visit_result, timed_out, sub_phases = visit_fn(
+            visit_url, profile="fallback", timeout=FALLBACK_WATCHDOG_SECONDS
+        )
+        if timed_out:
+            phase_note = _format_watchdog_phase_note(sub_phases)
+            logger.warning(
+                f"    ↳ ⏱️💀 [WATCHDOG] {cand['wd_desc']} exceeded {FALLBACK_WATCHDOG_SECONDS}s"
+                f"{phase_note} -- worker discarded"
+            )
+            fallback_log.append(cand["wd_log"])
+            wd_status = f"{playwright_status} + {watchdog_status_suffix}"
+            if tentative_catch_all is not None:
+                return (
+                    _build_catch_all_result(
+                        tentative_catch_all,
+                        wd_status,
+                        fallback_log,
+                        watchdog_timed_out=True,
+                        reason_suffix="fallback aborted by watchdog",
+                    ),
+                    tentative_catch_all,
+                    had_stage_catch_all,
+                )
+            return (
+                {
+                    "instagram_url": None,
+                    "instagram_handle": None,
+                    "facebook_url": None,
+                    "playwright_status": wd_status,
+                    "fallback_status": " | ".join(fallback_log),
+                    "watchdog_timed_out": True,
+                },
+                tentative_catch_all,
+                had_stage_catch_all,
+            )
+
+        if visit_result and visit_result.get("ok"):
+            s_ig, s_fb = visit_result.get("instagram_url"), visit_result.get("facebook_url")
+            if s_ig or s_fb:
+                sub_region = visit_result.get("scoped_region_hit")
+                if sub_region in NAVIGATIONAL_REGIONS:
+                    fallback_log.append(f"{entry_label} -> Found!")
+                    logger.info(f"    ↳ {hit_log_prefix} {visit_url}")
+                    return (
+                        {
+                            "instagram_url": s_ig,
+                            "instagram_handle": visit_result.get("instagram_handle"),
+                            "facebook_url": s_fb,
+                            "playwright_status": playwright_status,
+                            "fallback_status": " | ".join(fallback_log),
+                            "watchdog_timed_out": False,
+                        },
+                        tentative_catch_all,
+                        had_stage_catch_all,
+                    )
+                # FX-6 / D-5: subpage catch-all hit -- keep searching for a
+                # nav-region hit rather than stopping early.
+                had_stage_catch_all = True
+                logger.info(
+                    f"    ↳ ⚠️ [SUBPAGE CATCH-ALL HIT] {visit_url} region={sub_region} "
+                    f"ig={bool(s_ig)} fb={bool(s_fb)} -- continuing fallback chain for nav-region confirmation"
+                )
+                fallback_log.append(
+                    f"{entry_label} -> catch-all hit (region: {sub_region}) -- continuing for nav-region confirmation"
+                )
+                if tentative_catch_all is None:
+                    tentative_catch_all = {
+                        "instagram_url": s_ig,
+                        "instagram_handle": visit_result.get("instagram_handle"),
+                        "facebook_url": s_fb,
+                        "source": stage_source,
+                    }
+            else:
+                fallback_log.append(f"{entry_label} -> No Links")
+        else:
+            fallback_log.append(f"{entry_label} -> {_describe_visit_failure(visit_result)}")
+
+    return None, tentative_catch_all, had_stage_catch_all
+
+
 # =====================================================================
 # resolve_social_links -- the single entry point main_apify.py
 # calls. Runs the full fallback chain (see module docstring for order)
@@ -1180,12 +1381,33 @@ def resolve_social_links(worker: "PlaywrightWorker", website: str) -> dict[str, 
     # the same page, or the homepage itself reappearing as a sitemap <loc>.
     visited_urls: set[str] = set()
 
+    supports_phase_state = "phase_state" in inspect.signature(playwright_visit_and_scan).parameters
+
+    def _visit_with_phases(target_url: str, profile: str, timeout: float) -> tuple[Any, bool, dict[str, Any]]:
+        phase_state: dict[str, Any] = {}
+        if supports_phase_state:
+            if profile == "homepage":
+                fn = lambda ctx, u=target_url, ps=phase_state: playwright_visit_and_scan(ctx, u, phase_state=ps)
+            else:
+                fn = lambda ctx, u=target_url, p=profile, ps=phase_state: playwright_visit_and_scan(ctx, u, profile=p, phase_state=ps)
+        else:
+            if profile == "homepage":
+                fn = lambda ctx, u=target_url: playwright_visit_and_scan(ctx, u)
+            else:
+                fn = lambda ctx, u=target_url, p=profile: playwright_visit_and_scan(ctx, u, profile=p)
+        res, timed_out = worker.run(fn, timeout=timeout)
+        return res, timed_out, phase_state
+
     # ---- Stage 1: Homepage, scoped scan, 40s watchdog ----
-    homepage_result, timed_out = worker.run(
-        lambda ctx: playwright_visit_and_scan(ctx, website), timeout=HOMEPAGE_WATCHDOG_SECONDS
+    homepage_result, timed_out, hp_phases = _visit_with_phases(
+        website, profile="homepage", timeout=HOMEPAGE_WATCHDOG_SECONDS
     )
     if timed_out:
-        logger.warning(f"    ↳ ⏱️💀 [WATCHDOG] Homepage visit exceeded {HOMEPAGE_WATCHDOG_SECONDS}s -- worker discarded")
+        phase_note = _format_watchdog_phase_note(hp_phases)
+        logger.warning(
+            f"    ↳ ⏱️💀 [WATCHDOG] Homepage visit exceeded {HOMEPAGE_WATCHDOG_SECONDS}s"
+            f"{phase_note} -- worker discarded"
+        )
         return {
             "instagram_url": None, "instagram_handle": None, "facebook_url": None,
             "playwright_status": f"Timeout - Watchdog killed after {HOMEPAGE_WATCHDOG_SECONDS}s",
@@ -1235,17 +1457,17 @@ def resolve_social_links(worker: "PlaywrightWorker", website: str) -> dict[str, 
                 f"fb={bool(fb_url)} -- continuing fallback chain for nav-region confirmation"
             )
             tentative_catch_all = {
-                "instagram_url": ig_url, "instagram_handle": ig_handle, "facebook_url": fb_url,
-                "playwright_status": playwright_status,
-                "fallback_status": "",  # filled in at acceptance time
-                "watchdog_timed_out": False,
+                "instagram_url": ig_url,
+                "instagram_handle": ig_handle,
+                "facebook_url": fb_url,
+                "source": "homepage",
             }
             fallback_log.append(f"Homepage: catch-all hit (region: {region_hit}) -- saved as tentative, continuing for nav-region confirmation")
 
     if not tentative_catch_all:
         fallback_log.append("Homepage: no direct social links in scoped regions")
 
-    # ---- Stage 2: Sitemap discovery. Stops at first hit. ----
+    # ---- Stage 2: Sitemap discovery. Stops at first nav-region hit. ----
     # Two independent gates decide whether matched urlset slots get tested
     # at all, added 2026-07-12:
     #   (a) input-URL subpath trust -- see _should_trust_domain_sitemap()
@@ -1279,103 +1501,79 @@ def resolve_social_links(worker: "PlaywrightWorker", website: str) -> dict[str, 
                 f"{len(sitemap_info['matched_urlsets'])} matched section keywords)"
             )
 
-            for slot_idx, entry in enumerate(sitemap_info["matched_urlsets"][:MAX_URLSET_SLOTS]):
-                slot_url, slot_keyword = entry["url"], entry["matched_keyword"]
-                normalized = _normalize_url_for_dedup(slot_url)
-                if normalized in visited_urls:
-                    fallback_log.append(f"urlset[{slot_idx}] {slot_url} [{slot_keyword}] -> Skipped (already visited)")
-                    continue
-                visited_urls.add(normalized)
-
-                visit_result, slot_timed_out = worker.run(
-                    lambda ctx, u=slot_url: playwright_visit_and_scan(ctx, u, profile="fallback"), timeout=FALLBACK_WATCHDOG_SECONDS
-                )
-                if slot_timed_out:
-                    logger.warning(f"    ↳ ⏱️💀 [WATCHDOG] urlset[{slot_idx}] ({slot_url}) exceeded {FALLBACK_WATCHDOG_SECONDS}s -- worker discarded")
-                    fallback_log.append(f"Aborted at urlset[{slot_idx}] ({slot_url}) - watchdog")
-                    return {
-                        "instagram_url": None, "instagram_handle": None, "facebook_url": None,
-                        "playwright_status": playwright_status + " + Sitemap Watchdog Timeout",
-                        "fallback_status": " | ".join(fallback_log),
-                        "watchdog_timed_out": True,
-                    }
-
-                if visit_result and visit_result.get("ok"):
-                    s_ig, s_fb = visit_result.get("instagram_url"), visit_result.get("facebook_url")
-                    if s_ig or s_fb:
-                        fallback_log.append(f"urlset[{slot_idx}] {slot_url} [{slot_keyword}] -> Found!")
-                        logger.info(f"    ↳ ✅ [SITEMAP HIT] {slot_url}")
-                        return {
-                            "instagram_url": s_ig, "instagram_handle": visit_result.get("instagram_handle"),
-                            "facebook_url": s_fb,
-                            "playwright_status": playwright_status,
-                            "fallback_status": " | ".join(fallback_log),
-                            "watchdog_timed_out": False,
-                        }
-                    fallback_log.append(f"urlset[{slot_idx}] {slot_url} [{slot_keyword}] -> No Links")
-                else:
-                    fallback_log.append(f"urlset[{slot_idx}] {slot_url} [{slot_keyword}] -> {_describe_visit_failure(visit_result)}")
+            sitemap_candidates = [
+                {
+                    "url": entry["url"],
+                    "entry_label": f"urlset[{slot_idx}] {entry['url']} [{entry['matched_keyword']}]",
+                    "wd_desc": f"urlset[{slot_idx}] ({entry['url']})",
+                    "wd_log": f"Aborted at urlset[{slot_idx}] ({entry['url']}) - watchdog",
+                }
+                for slot_idx, entry in enumerate(sitemap_info["matched_urlsets"][:MAX_URLSET_SLOTS])
+            ]
+            stage2_result, tentative_catch_all, sitemap_had_catch_all = _run_fallback_candidates(
+                candidates=sitemap_candidates,
+                visited_urls=visited_urls,
+                fallback_log=fallback_log,
+                playwright_status=playwright_status,
+                stage_source="sitemap",
+                watchdog_status_suffix="Sitemap Watchdog Timeout",
+                hit_log_prefix="✅ [SITEMAP HIT]",
+                tentative_catch_all=tentative_catch_all,
+                visit_fn=_visit_with_phases,
+            )
+            if stage2_result is not None:
+                return stage2_result
 
             if sitemap_info["matched_urlsets"]:
-                fallback_log.append("Sitemap urlsets tested -- none yielded links")
+                if sitemap_had_catch_all:
+                    fallback_log.append("Sitemap urlsets tested -- no nav-region links found")
+                else:
+                    fallback_log.append("Sitemap urlsets tested -- none yielded links")
 
     # ---- Stage 3: Homepage section-link text candidates -- tried
     # regardless of sitemap outcome, since these came free with the
     # homepage visit already. ----
     if section_candidates:
         fallback_log.append(f"Section-text candidates: {len(section_candidates)} (testing up to {MAX_SECTION_TEXT_CANDIDATES})")
-        for cand in section_candidates[:MAX_SECTION_TEXT_CANDIDATES]:
-            cand_url = cand["url"]
-            normalized = _normalize_url_for_dedup(cand_url)
-            if normalized in visited_urls:
-                fallback_log.append(f"Section-text '{cand['matched_text']}' ({cand_url}) -> Skipped (already visited)")
-                continue
-            visited_urls.add(normalized)
-
-            visit_result, cand_timed_out = worker.run(
-                lambda ctx, u=cand_url: playwright_visit_and_scan(ctx, u, profile="fallback"), timeout=FALLBACK_WATCHDOG_SECONDS
-            )
-            if cand_timed_out:
-                logger.warning(f"    ↳ ⏱️💀 [WATCHDOG] Section-text visit ({cand_url}) exceeded {FALLBACK_WATCHDOG_SECONDS}s -- worker discarded")
-                fallback_log.append(f"Section-text '{cand['matched_text']}' -> Watchdog Timeout (aborted)")
-                return {
-                    "instagram_url": None, "instagram_handle": None, "facebook_url": None,
-                    "playwright_status": playwright_status + " + Section-Link Watchdog Timeout",
-                    "fallback_status": " | ".join(fallback_log),
-                    "watchdog_timed_out": True,
-                }
-            if visit_result and visit_result.get("ok"):
-                c_ig, c_fb = visit_result.get("instagram_url"), visit_result.get("facebook_url")
-                if c_ig or c_fb:
-                    fallback_log.append(f"Section-text '{cand['matched_text']}' ({cand_url}) -> Found!")
-                    logger.info(f"    ↳ ✅ [SECTION-TEXT HIT] {cand_url}")
-                    return {
-                        "instagram_url": c_ig, "instagram_handle": visit_result.get("instagram_handle"),
-                        "facebook_url": c_fb,
-                        "playwright_status": playwright_status,
-                        "fallback_status": " | ".join(fallback_log),
-                        "watchdog_timed_out": False,
-                    }
-                fallback_log.append(f"Section-text '{cand['matched_text']}' ({cand_url}) -> No Links")
-            else:
-                fallback_log.append(f"Section-text '{cand['matched_text']}' ({cand_url}) -> {_describe_visit_failure(visit_result)}")
+        section_items = [
+            {
+                "url": cand["url"],
+                "entry_label": f"Section-text '{cand['matched_text']}' ({cand['url']})",
+                "wd_desc": f"Section-text visit ({cand['url']})",
+                "wd_log": f"Section-text '{cand['matched_text']}' -> Watchdog Timeout (aborted)",
+            }
+            for cand in section_candidates[:MAX_SECTION_TEXT_CANDIDATES]
+        ]
+        stage3_result, tentative_catch_all, _ = _run_fallback_candidates(
+            candidates=section_items,
+            visited_urls=visited_urls,
+            fallback_log=fallback_log,
+            playwright_status=playwright_status,
+            stage_source="section-text",
+            watchdog_status_suffix="Section-Link Watchdog Timeout",
+            hit_log_prefix="✅ [SECTION-TEXT HIT]",
+            tentative_catch_all=tentative_catch_all,
+            visit_fn=_visit_with_phases,
+        )
+        if stage3_result is not None:
+            return stage3_result
     else:
         fallback_log.append("Section-text candidates: none")
 
     # Section-text was the true last resort -- guessed-path is retired
     # entirely (see module docstring). Nothing left to try.
 
-    # FX-6: if a catch-all-only homepage hit was saved as tentative and no
+    # FX-6: if a catch-all-only hit was saved as tentative and no
     # nav-region hit was found in Stages 2-3, accept the tentative with
     # a distinct low-confidence label so it can be filtered post-run.
     if tentative_catch_all is not None:
-        fallback_log.append("Accepted homepage catch-all (no nav-region confirmation found in fallback chain)")
-        tentative_catch_all["fallback_status"] = " | ".join(fallback_log)
-        logger.info(
-            f"    ↳ ⚠️ [CATCH-ALL ACCEPTED] No nav-region hit in fallback chain -- "
-            f"accepting homepage catch-all as low-confidence match"
+        return _build_catch_all_result(
+            tentative_catch_all,
+            playwright_status,
+            fallback_log,
+            watchdog_timed_out=False,
+            reason_suffix="no nav-region confirmation found in fallback chain",
         )
-        return tentative_catch_all
 
     fallback_log.append("No links found anywhere")
     return {

@@ -109,6 +109,7 @@ def _require_env(key: str) -> str:
 APIFY_API_TOKEN = _require_env("APIFY_API_TOKEN")
 
 OUTPUT_EXT = ".csv"   # stays here -- see comment above.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 # Pre-filtering rules (SKIP_WEBSITE_KEYWORDS and _is_skippable_website)
 # moved to playwright_engine.py so the engine owns URL validation
@@ -206,6 +207,56 @@ def _tier_sort_key(record: dict[str, Any]) -> tuple[int, int, int, str]:
     return (tier, ads_is_yes, followers_desc, name)
 
 
+IG_PARTIAL_MISSING_THRESHOLD = 0.20
+
+
+def _classify_resumable_ig_handles(
+    requested_handles: set[str],
+    missing_handles: set[str],
+    batch_status: Optional[str],
+    batch_failed: bool,
+    missing_threshold: float = IG_PARTIAL_MISSING_THRESHOLD,
+) -> set[str]:
+    """FX-11.3: Decide which missing IG handles should stay un-checkpointed in
+    Step 4 so `--resume` can re-request them.
+
+    - Non-SUCCEEDED/FINISHED runs (TIMED-OUT, ABORTED, FAILED) or failed batches
+      leave all missing handles resumable.
+    - SUCCEEDED/FINISHED runs with >20% handles missing leave all missing
+      handles resumable; <=20% missing is treated as normal dead-account noise.
+    """
+    if not missing_handles:
+        return set()
+
+    clean_missing = {h for h in missing_handles if h is not None}
+    if not clean_missing:
+        return set()
+
+    missing_ratio = (len(clean_missing) / len(requested_handles)) if requested_handles else 0.0
+    if batch_failed or (batch_status and batch_status not in ("SUCCEEDED", "FINISHED")):
+        logging.warning(
+            f"    ⚠️ [IG RESUMABLE] Batch ended with status={batch_status!r} and "
+            f"{len(clean_missing)}/{len(requested_handles)} handle(s) missing "
+            f"({missing_ratio:.1%}) -- leaving un-checkpointed so --resume can retry."
+        )
+        return clean_missing
+
+    if missing_ratio > missing_threshold:
+        logging.warning(
+            f"    ⚠️ [IG RESUMABLE] {len(clean_missing)}/{len(requested_handles)} handle(s) "
+            f"missing ({missing_ratio:.1%} > {missing_threshold:.0%} threshold, "
+            f"status={batch_status!r}) -- leaving un-checkpointed so --resume can retry."
+        )
+        return clean_missing
+
+    logging.info(
+        f"    ℹ️ [IG PARTIAL OK] {len(clean_missing)}/{len(requested_handles)} handle(s) "
+        f"missing ({missing_ratio:.1%} <= {missing_threshold:.0%} threshold, "
+        f"status={batch_status!r}) -- treating as terminal missing handles."
+    )
+    return set()
+
+
 class CircuitBreakerTriggered(RuntimeError):
     """Raised after a durable checkpoint when local health says to stop."""
 
@@ -244,9 +295,9 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _configure_execution_log(session_id: str) -> str:
-    """Add a per-invocation UTF-8 file log and return its relative name."""
+    """Add a per-invocation UTF-8 file log and return its absolute path."""
     global _ACTIVE_LOG_HANDLER
-    logs_dir = Path("logs")
+    logs_dir = PROJECT_ROOT / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
     log_path = logs_dir / f"pipeline_{session_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
     handler = logging.FileHandler(log_path, encoding="utf-8")
@@ -697,6 +748,7 @@ def main() -> None:
     # =====================================================================
     instagram_profile_map: dict[str, dict[str, Any]] = {}
     instagram_status_overrides: dict[str, str] = {}
+    resumable_ig_handles: set[str] = set()
     
     if instagram_urls_batch:
         instagram_urls_batch = list(set(instagram_urls_batch))
@@ -709,7 +761,13 @@ def main() -> None:
                 config.INSTAGRAM_RUN_INPUT,
                 run_timeout=timedelta(minutes=config.INSTAGRAM_RUN_TIMEOUT_MINUTES),
             )
-            health.record_network_result(True)
+            ig_batch_status = getattr(session, "last_instagram_batch_status", None)
+            ig_batch_failed = bool(getattr(session, "last_instagram_batch_failed", False))
+
+            if ig_batch_failed:
+                health.record_network_result(False)
+            else:
+                health.record_network_result(True)
             _check_health(health, "after Instagram batch")
     
             for profile in ig_results:
@@ -779,11 +837,22 @@ def main() -> None:
     
             accounted_handles = set(instagram_profile_map.keys()) | set(instagram_status_overrides.keys())
             missing_handles = requested_handles - accounted_handles
+            missing_label = (
+                "undefined (instagram batch call failed)"
+                if ig_batch_failed
+                else "undefined (missing from batch response)"
+            )
             for handle in missing_handles:
                 if handle is not None:
-                    instagram_status_overrides[handle] = "undefined (missing from batch response)"
+                    instagram_status_overrides[handle] = missing_label
             if missing_handles:
                 logging.warning(f"    ⚠️ [IG BATCH RECONCILIATION] {len(missing_handles)} handle(s) never appeared in the response at all.")
+                resumable_ig_handles = _classify_resumable_ig_handles(
+                    requested_handles=requested_handles,
+                    missing_handles=missing_handles,
+                    batch_status=ig_batch_status,
+                    batch_failed=ig_batch_failed,
+                )
 
             # Additional sanity check (2026-07-22, post-resultsLimit-bugfix):
             # purely observational, changes no record's classification and
@@ -829,6 +898,7 @@ def main() -> None:
                 if m:
                     h = m.group(1).split('?')[0].strip('/').lower()
                     instagram_status_overrides.setdefault(h, "undefined (instagram batch call failed)")
+                    resumable_ig_handles.add(h)
     
     # =====================================================================
     # Step 4: Filter + Ads check.
@@ -860,6 +930,7 @@ def main() -> None:
     logging.info("\nStep 4: Running filter thresholds and Meta Ads checks...")
     pending_step4_ids = set(session.get_pending_place_ids(step=4))
     logging.info(f"[SESSION] Step 4 has {len(pending_step4_ids)} pending place(s).")
+    still_pending_step4_ig_ids: set[str] = set()
 
     def _checkpoint_step4(place_id: str, record: dict[str, Any]) -> None:
         session.record_step4_result(place_id, {
@@ -887,7 +958,10 @@ def main() -> None:
         if handle_key and handle_key in instagram_status_overrides:
             record["Passed Filter Check"] = instagram_status_overrides[handle_key]
             record["Running Active Ads"]  = "Skipped (No Usable IG Data)"
-            _checkpoint_step4(place_id, record)
+            if handle_key in resumable_ig_handles:
+                still_pending_step4_ig_ids.add(place_id)
+            else:
+                _checkpoint_step4(place_id, record)
             continue
     
         if handle_key and handle_key in instagram_profile_map:
@@ -1070,12 +1144,23 @@ def main() -> None:
         if pid in local_records:
             local_records[pid]["Playwright Status"] = "Pending - Not Crawled (No Browser Available)"
 
+    # FX-11.3: preserve honest undefined statuses in this run's CSV for places
+    # left un-checkpointed in Step 4 so --resume can re-request their IG handles.
+    for pid in still_pending_step4_ig_ids:
+        if pid in local_records:
+            h_key = local_records[pid].get("Instagram Handle")
+            local_records[pid]["Passed Filter Check"] = (
+                instagram_status_overrides.get(h_key, "undefined (missing from batch response)")
+                if h_key else "undefined (missing from batch response)"
+            )
+            local_records[pid]["Running Active Ads"] = "Skipped (No Usable IG Data)"
+
     sorted_records = sorted(local_records.values(), key=_tier_sort_key)
     
-    csv_file = f"{config.OUTPUT_BASE_NAME}{OUTPUT_EXT}"
+    csv_file = PROJECT_ROOT / f"{config.OUTPUT_BASE_NAME}{OUTPUT_EXT}"
     counter  = 1
     while os.path.exists(csv_file):
-        csv_file = f"{config.OUTPUT_BASE_NAME}({counter}){OUTPUT_EXT}"
+        csv_file = PROJECT_ROOT / f"{config.OUTPUT_BASE_NAME}({counter}){OUTPUT_EXT}"
         counter += 1
     
     with open(csv_file, mode="w", newline="", encoding="utf-8") as f:
@@ -1105,23 +1190,31 @@ def main() -> None:
                 data.get("Fallback Status", ""),
             ])
 
-    # FX-2b: only finalize and archive if all Step 2 places were processed.
-    # Otherwise keep the session active so --resume can retry them.
-    if still_pending_step2:
-        session.end_execution_log(_ACTIVE_LOG_ID, reason="partial_no_browser")
+    # FX-2b / FX-11.3: only finalize and archive if all Step 2 places were
+    # crawled and no IG handles remain pending for --resume retry.
+    if still_pending_step2 or still_pending_step4_ig_ids:
+        if still_pending_step2 and still_pending_step4_ig_ids:
+            reason = "partial_no_browser_and_instagram"
+        elif still_pending_step2:
+            reason = "partial_no_browser"
+        else:
+            reason = "partial_instagram_batch"
+        session.end_execution_log(_ACTIVE_LOG_ID, reason=reason)
         _ACTIVE_LOG_ID = None
         session.close()
         _ACTIVE_SESSION = None
         logging.warning(
-            f"\n⚠️ [SESSION NOT ARCHIVED] {len(still_pending_step2)} place(s) were never crawled (no browser). "
+            f"\n⚠️ [SESSION NOT ARCHIVED] Pending work remains "
+            f"(step2 no-browser: {len(still_pending_step2)}, "
+            f"step4 incomplete IG batch: {len(still_pending_step4_ig_ids)}). "
             f"Session file remains active at: {session.db_path}\n"
-            f"   Resume when a browser is available using:\n"
+            f"   Resume to retry remaining places using:\n"
             f"   python main_apify.py --resume {session.db_path}"
         )
     else:
         session.end_execution_log(_ACTIVE_LOG_ID, reason="complete")
         _ACTIVE_LOG_ID = None
-        session.finalize(output_csv_filename=csv_file)
+        session.finalize(output_csv_filename=str(csv_file))
         _ACTIVE_SESSION = None
 
     if _ACTIVE_HEARTBEAT is not None:
