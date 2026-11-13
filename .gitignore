@@ -1,8 +1,13 @@
+# Few files (Output, *.csv, *.geojson & config.py) are just committed for example purpose for now. 
+# Those are meant to be gitignored.
+
 *.geojson
 *.pyc
 *.csv
 .env
 
 logs/
+Output
 sessions/
-Output/
+
+#config.py
